@@ -4,34 +4,38 @@
 
 \TLV
    // =============================================================================
-   // VizInteract v1.0 + Makerchip IDE Bridge
+   // VizInteract v2.0 — Makerchip \viz_js Interactive UI Library
    // =============================================================================
-   // A paste-once library for TL-Verilog \viz_js blocks that adds:
-   //   - Mouse / keyboard input with proper focus management
-   //   - Hit-testable click and hover zones
+   // A paste-once library for TL-Verilog \viz_js blocks.
+   //
+   // WHAT THIS GIVES YOU:
+   //   - Declarative UI pattern (React-style: change state, call redraw)
+   //   - Mouse click and hover hit zones
+   //   - Keyboard input with proper focus management
    //   - In-place object updates (no flicker)
    //   - Instant redraw without stepping the simulation
    //   - Synchronous read/write access to Makerchip's editor buffer
-   //   - Programmatic recompile triggering
+   //   - Programmatic cycle scrubbing
+   //   - Full waveData / signal inspection API
    //
    // USAGE:
-   //   Paste the entire init() library block (between the START and END
-   //   markers) at the top of your own init(). Paste the two-line render()
-   //   boilerplate at the top of your render(). Write your code after the
-   //   markers. Do not modify anything inside the markers.
+   //   1. Paste the entire init() library block into your own init().
+   //   2. Add the two-line boilerplate at the top of your render().
+   //   3. Optionally define onTraceData() for state reset on recompile.
+   //   4. Write your own code after the END markers.
    //
-   // STATUS TAGS USED IN THIS FILE:
-   //   [VERIFIED]    Tested end-to-end in the Makerchip web IDE.
-   //   [INFERRED]    Exists per method-name probing; behavior not tested.
-   //   [UNVERIFIED]  Claimed in source dumps / docs but not confirmed in practice.
-   //   [ABSENT]      Actively searched for and confirmed not to exist.
-   //   [UNUSED]      Available and known to work, but not wired into the library.
+   // VERIFIED STATUS TAGS:
+   //   [VERIFIED]    Tested end-to-end.
+   //   [INFERRED]    Exists per object inspection; behavior not fully tested.
+   //   [UNVERIFIED]  Claimed in source/docs but not confirmed in practice.
+   //   [ABSENT]      Actively confirmed not to exist.
    //
    // STABILITY:
-   //   VizInteract's input/drawing layer is built on eternal browser APIs and
-   //   should work indefinitely. The IDE bridge is built on UNDOCUMENTED
-   //   Makerchip internals and may break on any Makerchip update. If the bridge
-   //   breaks, VI.ide.available will be false and input/drawing still work.
+   //   VizInteract's input/drawing layer is built on stable browser APIs and
+   //   should work indefinitely. The IDE bridge and internal pane access are
+   //   built on UNDOCUMENTED Makerchip internals and may break on any update.
+   //   If internals break, VI.ide.available will be false and the rest still
+   //   works.
    // =============================================================================
 
    |calc
@@ -45,11 +49,13 @@
 
             init() {
                // ================================================================
-               // START VizInteract v1.0 library — do not modify this block
+               // START VizInteract v2.0 — do not modify this block
                // ================================================================
                const self = this;
                const VI = {};
                this._VI = VI;
+
+               // Internal state
                VI._labels      = {};
                VI._objects     = {};
                VI._hotkeys     = {};
@@ -58,14 +64,44 @@
                VI._lastHovered = {};
 
                // ----------------------------------------------------------------
+               // VI.redraw()
+               // ----------------------------------------------------------------
+               // THE CANONICAL DECLARATIVE REDRAW. This is the most important
+               // thing in this library. Always call this after mutating state.
+               //
+               // HOW IT WORKS:
+               //   Makerchip's VizElement.render() has an assertion:
+               //     Utils.assert(!un === (pane.renderedCyc === null))
+               //   This means you cannot call render() while the canvas is
+               //   already rendered — you must unrender() first to reset
+               //   pane.renderedCyc to null, then render() again. Skipping
+               //   unrender() causes a failed assertion AND silently duplicates
+               //   Fabric objects (memory leak). Always use VI.redraw(), never
+               //   call pane.render() or pane.unrender() directly.
+               //
+               // WHY NOT requestRenderAllBound():
+               //   requestRenderAllBound() only repaints whatever Fabric objects
+               //   are already on the canvas. It does NOT re-execute your
+               //   render() block. If your render() block reads state variables
+               //   to decide what to draw, requestRenderAllBound() will show
+               //   stale visuals. VI.redraw() actually re-runs render().
+               // ----------------------------------------------------------------
+               VI.redraw = function() {
+                  if (self._viz && self._viz.pane) {
+                     const pane = self._viz.pane;
+                     if (typeof pane.unrender === "function") pane.unrender();
+                     if (typeof pane.render  === "function") pane.render();
+                  }
+                  self.getCanvas().renderAll();
+               };
+
+               // ----------------------------------------------------------------
                // Focus management
                // ----------------------------------------------------------------
-               // The viz canvas needs keyboard focus to receive keydown events,
-               // but clicks on the Makerchip editor (a CodeMirror textarea)
-               // steal focus. We steal it back on mousedown anywhere outside
-               // the editor. mousedown fires before the browser actually
-               // transfers focus, so the refocus happens before mouseup runs
-               // its guard check.
+               // The viz canvas needs keyboard focus for keydown events.
+               // Clicks on CodeMirror (the editor textarea) steal focus.
+               // We steal it back on every mousedown via the capture phase,
+               // which fires before the browser transfers focus.
                // ----------------------------------------------------------------
                const canvasEl = fabric.document.querySelector("canvas");
                const focusTarget = canvasEl ? canvasEl.closest("div") : null;
@@ -81,11 +117,11 @@
                };
 
                // ----------------------------------------------------------------
-               // Coordinate mapping
+               // VI.toCanvasCoords(clientX, clientY)
                // ----------------------------------------------------------------
-               // Raw clientX/clientY are page coordinates. We need canvas
-               // coordinates that account for the element position AND any
-               // viewport transform (pan/zoom) applied to the Fabric canvas.
+               // Converts raw DOM mouse coordinates to viz canvas coordinates,
+               // accounting for canvas position AND Fabric viewport pan/zoom.
+               // Always use this inside mouse event handlers.
                // ----------------------------------------------------------------
                VI.toCanvasCoords = function(clientX, clientY) {
                   if (!canvasEl) return {x: 0, y: 0};
@@ -99,16 +135,11 @@
                };
 
                // ----------------------------------------------------------------
-               // Instant redraw (does not step the simulation)
-               // ----------------------------------------------------------------
-               VI.redraw = function() {
-                  self.getCanvas().requestRenderAllBound();
-               };
-
-               // ----------------------------------------------------------------
                // VI.label(id, text, x, y, color, fontSize)
-               // Create on first call, update in place on subsequent calls.
-               // In-place updates avoid flicker and preserve object identity.
+               // ----------------------------------------------------------------
+               // Create a text label on first call; update in place on
+               // subsequent calls. In-place updates avoid flicker and preserve
+               // object identity across redraws.
                // ----------------------------------------------------------------
                VI.label = function(id, text, x, y, color, fontSize) {
                   const c = self.getCanvas();
@@ -124,7 +155,7 @@
                      VI._labels[id] = obj;
                   } else {
                      VI._labels[id].set("text", String(text));
-                     if (color)    VI._labels[id].set("fill", color);
+                     if (color)    VI._labels[id].set("fill",     color);
                      if (fontSize) VI._labels[id].set("fontSize", fontSize);
                   }
                   return VI._labels[id];
@@ -132,6 +163,10 @@
 
                // ----------------------------------------------------------------
                // VI.rect(id, x, y, w, h, fill, stroke)
+               // ----------------------------------------------------------------
+               // Create a rectangle on first call; update fill/stroke in place
+               // on subsequent calls. Position and size are set only on creation.
+               // To reposition, use VI._objects[id].set({left, top}) directly.
                // ----------------------------------------------------------------
                VI.rect = function(id, x, y, w, h, fill, stroke) {
                   const c = self.getCanvas();
@@ -155,6 +190,10 @@
                // ----------------------------------------------------------------
                // Click / hover / hotkey registration
                // ----------------------------------------------------------------
+               // _clickZones and _hoverZones are cleared by clearAll().
+               // If you use clearAll() in render(), re-register zones there.
+               // _hotkeys persist across clearAll() — register once in init().
+               // ----------------------------------------------------------------
                VI.onClick = function(id, x, y, w, h, callback) {
                   VI._clickZones = VI._clickZones.filter(function(z) {
                      return z.id !== id;
@@ -172,6 +211,17 @@
                   VI._hotkeys[key] = callback;
                };
 
+               // ----------------------------------------------------------------
+               // VI.clearAll() / VI.clearZones()
+               // ----------------------------------------------------------------
+               // clearAll(): wipes canvas + all labels/objects/zones. Use at
+               //   top of render() for a full declarative rebuild each cycle.
+               //   After clearAll(), re-register all onClick/onHover zones.
+               //
+               // clearZones(): clears only hit zones, keeps visual objects.
+               //   Use when you want to update zone positions without
+               //   rebuilding the entire canvas.
+               // ----------------------------------------------------------------
                VI.clearAll = function() {
                   const c = self.getCanvas();
                   c.clear();
@@ -187,6 +237,7 @@
                   VI._hoverZones = {};
                };
 
+               // Internal hit test
                const _hit = function(zone, cx, cy) {
                   return cx >= zone.x && cx <= zone.x + zone.w &&
                          cy >= zone.y && cy <= zone.y + zone.h;
@@ -194,8 +245,15 @@
 
                // ----------------------------------------------------------------
                // Mouse events
-               // mousedown always steals focus; mouseup runs click logic after
-               // focus has transferred so the guard works correctly.
+               // ----------------------------------------------------------------
+               // mousedown: always steal focus back from editor.
+               // mouseup: run click zone hit tests (after focus has settled).
+               // mousemove: run hover zone enter/leave logic.
+               //
+               // NOTE: These listeners are added to fabric.document (the real
+               // parent DOM), not the Fabric canvas. They persist for the life
+               // of the viz instance and are NOT removed on recompile — the
+               // entire viz iframe is replaced instead.
                // ----------------------------------------------------------------
                fabric.document.addEventListener("mousedown", function(e) {
                   if (focusTarget) focusTarget.focus();
@@ -234,13 +292,18 @@
                // ================================================================
                // Makerchip IDE bridge
                // ================================================================
-               // Synchronous read/write access to the editor buffer, plus the
-               // ability to trigger real recompiles from inside viz_js.
+               // Synchronous read/write access to the editor buffer and the
+               // ability to trigger recompiles from inside viz_js.
                //
                // UNDOCUMENTED INTERNAL API. May break on any Makerchip update.
                // If it breaks, VI.ide.available becomes false and all bridge
-               // calls return false/null with a warning — the rest of
-               // VizInteract continues to work.
+               // calls return false/null — the rest of VizInteract still works.
+               //
+               // ACCESS PATHS (tried in order, all reach the same object):
+               //   1. fabric.window.ide                     [VERIFIED]
+               //   2. fabric.document.defaultView.ide       [VERIFIED]
+               //   3. self._viz.pane.ide                    [VERIFIED]
+               //   4. window.ide                            [UNRELIABLE]
                //
                // NEVER call VI.ide.recompile or VI.ide.patch from init() or
                // render(). Each recompile creates a fresh viz instance that
@@ -252,25 +315,17 @@
                (function() {
                   let ide = null;
                   try {
-                     // Four known access paths, tried in order.
-                     //   1. fabric.window.ide                        [VERIFIED]
-                     //   2. fabric.document.defaultView.ide          [VERIFIED, same object]
-                     //   3. self._viz.modelScope.viz_js.pane.ide     [VERIFIED, via viz instance]
-                     //   4. window.ide                               [UNRELIABLE — undefined in some contexts]
                      if (typeof fabric !== "undefined" && fabric.window && fabric.window.ide) {
                         ide = fabric.window.ide;
                      } else if (typeof fabric !== "undefined" && fabric.document &&
                                 fabric.document.defaultView && fabric.document.defaultView.ide) {
                         ide = fabric.document.defaultView.ide;
-                     } else if (self._viz && self._viz.modelScope &&
-                                self._viz.modelScope.viz_js &&
-                                self._viz.modelScope.viz_js.pane &&
-                                self._viz.modelScope.viz_js.pane.ide) {
-                        ide = self._viz.modelScope.viz_js.pane.ide;
+                     } else if (self._viz && self._viz.pane && self._viz.pane.ide) {
+                        ide = self._viz.pane.ide;
                      } else if (typeof window !== "undefined" && window.ide) {
                         ide = window.ide;
                      }
-                  } catch (e) { /* sandboxed, bridge unreachable */ }
+                  } catch (e) { /* sandboxed */ }
 
                   if (ide && ide.IDEMethods &&
                       typeof ide.IDEMethods.getCode === "function" &&
@@ -286,9 +341,10 @@
 
                // ----------------------------------------------------------------
                // VI.ide.getCode()  [VERIFIED]
+               // ----------------------------------------------------------------
                // Returns {code: string, changeGeneration: number} or null.
-               // Synchronous. Arity 0. The `code` field is the full current
-               // source of the TLV file including the viz_js block itself.
+               // Synchronous. The code field is the full current TLV source
+               // including the viz_js block itself.
                // ----------------------------------------------------------------
                VI.ide.getCode = function() {
                   if (!VI.ide.available) return null;
@@ -304,30 +360,22 @@
 
                // ----------------------------------------------------------------
                // VI.ide.recompile(newCode)  [VERIFIED]
+               // ----------------------------------------------------------------
                // Writes newCode to the editor buffer and triggers a real
-               // recompile. Synchronous. Underlying loadProject arity is 2 —
-               // the second argument is probably readOnly:boolean per the
-               // deobfuscated source, but this is [UNVERIFIED] and the
-               // library always calls with one argument.
+               // recompile. Returns true if the call went through.
                //
-               // Returns true if the call went through, false if blocked.
+               // NEVER call from init() or render() — infinite loop.
                // ----------------------------------------------------------------
                VI.ide.recompile = function(newCode) {
                   if (!VI.ide.available) {
-                     console.warn("VI.ide.recompile: bridge offline");
-                     return false;
+                     console.warn("VI.ide.recompile: bridge offline"); return false;
                   }
                   if (VI.ide._busy) {
-                     console.warn("VI.ide.recompile: already compiling");
-                     return false;
+                     console.warn("VI.ide.recompile: already compiling"); return false;
                   }
                   try {
                      VI.ide._busy = true;
                      VI.ide._m.loadProject(newCode);
-                     // 3s failsafe. In practice the viz instance is replaced
-                     // by the recompile before this fires, so _busy naturally
-                     // resets when the new viz runs init(). This setTimeout
-                     // only matters if loadProject fails without rebuilding.
                      setTimeout(function() { VI.ide._busy = false; }, 3000);
                      return true;
                   } catch (e) {
@@ -338,18 +386,15 @@
                };
 
                // ----------------------------------------------------------------
-               // VI.ide.patch(name, value)  [VERIFIED pattern]
-               // Convenience: find a pipesignal assignment of the form
-               //   $name[x:y] = <anything>;
-               // and replace it with
-               //   $name[7:0] = <value>;
-               // then recompile. Uses decimal to avoid apostrophes in Verilog
-               // radix literals (which crash the viz_js parser — see gotchas).
+               // VI.ide.patch(name, value)  [VERIFIED]
+               // ----------------------------------------------------------------
+               // Find $name[x:y] = <anything>; in the source and replace with
+               // $name[7:0] = <value>; then recompile. Uses decimal to avoid
+               // apostrophes in Verilog radix literals (which crash the parser).
+               // Returns true on success, false if pattern not found.
                //
-               // Returns true on success, false if the pattern wasn't found
-               // (prevents silent no-op recompiles) or the bridge is offline.
-               //
-               // For SV state signals (*name = ...;) use VI.ide.patchState.
+               // For *sv_signal assignments use VI.ide.patchState().
+               // NEVER call from init() or render() — infinite loop.
                // ----------------------------------------------------------------
                VI.ide.patch = function(name, value) {
                   const r = VI.ide.getCode();
@@ -361,26 +406,24 @@
                      console.warn("VI.ide.patch: no match for $" + name + "[x:y] = ...;");
                      return false;
                   }
-                  // $$ escapes String.replace to emit a literal $
                   const replacement = "$$" + name + "[7:0] = " + value + ";";
                   const newCode = r.code.replace(regex, replacement);
                   if (newCode === r.code) {
-                     console.warn("VI.ide.patch: replace was a no-op");
-                     return false;
+                     console.warn("VI.ide.patch: replace was a no-op"); return false;
                   }
                   return VI.ide.recompile(newCode);
                };
 
                // ----------------------------------------------------------------
-               // VI.ide.patchState(name, value)  [VERIFIED pattern]
-               // Same as patch() but for SV state signals (*name instead of $name).
+               // VI.ide.patchState(name, value)  [VERIFIED]
+               // ----------------------------------------------------------------
+               // Same as patch() but for *sv_state signals.
+               // Finds *name = <anything>; and replaces with *name = <value>;
                // ----------------------------------------------------------------
                VI.ide.patchState = function(name, value) {
                   const r = VI.ide.getCode();
                   if (!r) return false;
-                  const regex = new RegExp(
-                     "\\*" + name + "\\s*=\\s*[^;]+;", "g"
-                  );
+                  const regex = new RegExp("\\*" + name + "\\s*=\\s*[^;]+;", "g");
                   if (!regex.test(r.code)) {
                      console.warn("VI.ide.patchState: no match for *" + name + " = ...;");
                      return false;
@@ -393,93 +436,12 @@
 
                // ----------------------------------------------------------------
                // VI.ide.setCycle(n)  [VERIFIED]
-               // Scrubs the global viz playhead to cycle n without stepping
-               // the simulation. Combined with the sugar API (see SIGNAL
-               // ACCESS section below), this is how you build "instant"
-               // interactive UIs: setCycle moves the playhead, redraw causes
-               // render() to rerun, and the sugar API inside render() reads
-               // values at the new cycle automatically. No offset math.
+               // ----------------------------------------------------------------
+               // Scrubs the viz playhead to cycle n without recompiling.
+               // Use with the cycle-enumeration pattern (see PATTERNS section).
                //
-               // ================================================================
-               // CANONICAL INTERACTIVE UPDATE PATTERN (verified working)
-               // ================================================================
-               // This is THE idiom for interactive viz_js. Memorize it. Every
-               // failed attempt in this library's development history came
-               // from deviating from it.
-               //
-               // In init(), define a teleport helper and bind it to events:
-               //
-               //    self.targetCycle = 0;
-               //    self._teleport = function(n) {
-               //       self.targetCycle = n;
-               //       VI.ide.setCycle(n);   // move the playhead
-               //       VI.redraw();          // causes render() to rerun
-               //    };
-               //    VI.onKey("w", function() {
-               //       self._teleport((self.targetCycle + 1) % 4);
-               //    });
-               //
-               // In render(), read signals with the sugar API (see below):
-               //
-               //    const a = '$input_a'.asInt();
-               //    const r = '$result'.asInt();
-               //    VI.label("a", "A: " + a, 20, 100, "#6f6", 24);
-               //    VI.label("r", "R: " + r, 20, 140, "#ffcc00", 24);
-               //
-               // RULES:
-               //   - Signal READS go in render() only, never in event handlers.
-               //     The sugar API reads at the viz's current displayed cycle,
-               //     which is whatever setCycle most recently set.
-               //   - Event handlers call setCycle + redraw. That's it. They
-               //     do NOT read signals, do NOT update labels directly.
-               //   - render() is where all label/rect drawing happens, using
-               //     values freshly read via the sugar API.
-               //
-               // WHY: render() reruns on every redraw() call and is the only
-               // context where the sugar API resolves correctly. Reading from
-               // an event handler reads stale values from whenever render()
-               // last ran, which is why earlier versions of this library saw
-               // labels showing the wrong data after clicks.
-               //
-               // ================================================================
-               // THE CYCLE-ENUMERATION PATTERN (what makes this interactive)
-               // ================================================================
-               // setCycle only helps if your sim actually contains a cycle
-               // whose values match the UI state you want to display. The
-               // trick is to pre-compute every possible UI state in a single
-               // sim run by wiring UI-driven signals to *cyc_cnt bits:
-               //
-               // 1. In your TLV, wire the UI-driven signals to bits of *cyc_cnt:
-               //
-               //       $switch_a[1:0] = *cyc_cnt[1:0];
-               //       $switch_b[1:0] = *cyc_cnt[3:2];
-               //
-               //    Over the first 16 cycles, every combination of switch_a
-               //    and switch_b is covered. Pick cyc_cnt widths to cover your
-               //    full input space: N input bits total = 2^N cycles needed.
-               //
-               // 2. Make sure *passed doesn't fire until after your enumeration
-               //    is complete, so the sim actually runs through all cycles:
-               //
-               //       *passed = *cyc_cnt > 16;
-               //
-               // 3. Compute the target cycle from UI state and teleport:
-               //
-               //       const targetCycle = self.swA | (self.swB << 2);
-               //       self._teleport(targetCycle);
-               //
-               // 4. render() reads $switch_a, $switch_b, and anything derived
-               //    from them (like $result) via the sugar API. The values
-               //    come from whatever cycle the playhead is on.
-               //
-               // TRADEOFFS:
-               //   + Zero-latency updates, no recompile needed
-               //   + Works for any $signal derived from the UI-driven inputs
-               //   - Limited to small input spaces: 8 input bits = 256 cycles
-               //     (fine), 16 = 65k (slow to sim), 32+ = not feasible
-               //   - Doesn't work for signals derived from state that depends
-               //     on history (registers, counters, memory) — those need
-               //     real sim stepping or recompile via VI.ide.patch
+               // After setCycle(), call VI.redraw() to re-run render() so
+               // signal reads via the sugar API reflect the new cycle.
                // ----------------------------------------------------------------
                VI.ide.setCycle = function(n) {
                   if (VI.ide.available && VI.ide._ide.viz &&
@@ -487,519 +449,200 @@
                      try {
                         VI.ide._ide.viz.setCycle(n);
                         return true;
-                     } catch (e) {
-                        console.error("VI.ide.setCycle threw:", e);
-                     }
+                     } catch (e) { console.error("VI.ide.setCycle threw:", e); }
                   }
                   return false;
                };
 
                // ================================================================
-               // SIGNAL ACCESS — the sugar API
+               // Signal access — the sugar API
                // ================================================================
-               // This is the most important thing in this file. Every failed
-               // attempt to read signals from viz_js came from not knowing
-               // this, and no amount of documentation searching will lead an
-               // LLM to it — it's only visible in the Game of Life example
-               // shipped with Makerchip. Read this section carefully.
-               //
-               // HOW TO READ SIGNAL VALUES (the only way that works):
-               //
-               //    const a = '$input_a'.asInt();      // read as integer
-               //    const b = '$ready'.asBool();       // read as boolean
-               //    const p = '>>1$input_a'.asInt();   // previous cycle
-               //
-               // THE RULE: signal references are SINGLE-QUOTED STRING LITERALS
-               // with the full TL-Verilog signal name inside. SandPiper's
-               // preprocessor scans viz_js code for single-quoted strings
-               // matching the pattern '$name' or '>>N$name' and rewrites them
-               // into real signal lookups BEFORE the code runs. Methods like
-               // .asInt() and .asBool() are not real String methods — they
-               // are part of the rewritten code.
-               //
-               // CRITICAL: DOUBLE QUOTES DO NOT WORK.
-               //
-               //    '$input_a'.asInt()   // YES — preprocessor rewrites this
-               //    "$input_a".asInt()   // NO — plain string, throws at runtime
-               //
-               // If you write the signal name with double quotes, SandPiper
-               // does not rewrite it, .asInt() doesn't exist on plain strings,
-               // and you get a runtime exception. This has burned multiple
-               // LLMs and wasted hours of debugging. ALWAYS use single quotes
-               // around signal references.
-               //
-               // This is in direct tension with the general viz_js advice to
-               // "use double quotes because single quotes are reserved for
-               // TLV signal references." Both statements are true — single
-               // quotes ARE reserved, and they're reserved BECAUSE they mean
-               // "signal reference" when you use them this way. The correct
-               // combined rule is:
-               //
-               //    - Signal reference: '$foo'     (single quotes, required)
-               //    - Plain string:     "hello"   (double quotes, required)
-               //    - Apostrophe in a string literal: NEVER. Crashes SandPiper.
-               //      Use String.fromCharCode(39) or restructure.
-               //    - Verilog radix literals like `8'h01` in strings: NEVER,
-               //      same reason. Use decimal.
-               //
-               // AVAILABLE METHODS (from the Game of Life example and testing):
-               //    .asInt()   — verified, returns Number for multi-bit signals
-               //    .asBool()  — verified, returns boolean for 1-bit signals
-               //    .asNum()   — possibly exists as alternate name for asInt,
-               //                 untested but safe fallback in try/catch
-               //
-               // WHERE YOU CAN CALL IT:
-               //   - Inside render()                      [VERIFIED WORKING]
-               //   - Inside event handlers                [DOES NOT WORK — reads stale]
-               //   - Inside setTimeout/setInterval        [UNTESTED]
-               //
-               // Always read in render(). To update after user interaction,
-               // your event handler should call VI.ide.setCycle(n) and
-               // VI.redraw(), which causes render() to rerun, which is where
-               // the fresh read happens. See the CANONICAL INTERACTIVE
-               // UPDATE PATTERN above for the full idiom.
-               //
-               // WHY THE SUGAR API AND NOT sigRef/sigVal:
-               // The raw sigRef/sigVal methods exist on the viz instance but
-               // using them directly requires knowing the internal signal
-               // name, which includes pipeline scope encoding and is not the
-               // name you wrote in your TLV source. The sugar API handles all
-               // of that via the preprocessor. Don't try to use sigRef/sigVal
-               // unless you already know exactly what string to pass it, and
-               // you won't know unless you dump the internal signal table
-               // (which is undocumented and varies by design).
-               //
-               // ================================================================
-               // ADDITIONAL CAPABILITIES — available but not wired in
-               // ================================================================
-               //
-               // --- Instant $signal updates without recompiling ---
-               //
-               // Two mechanisms exist for changing $signal values in response
-               // to UI input. Pick the one that fits your latency needs:
-               //
-               //   SLOW PATH (seconds): VI.ide.patch(name, value)
-               //     Rewrites the TLV source and triggers a full recompile.
-               //     Works for any signal and any value. Latency ~2-5 seconds
-               //     per change. Use for parameters you change rarely (mode
-               //     selects, constants, config values).
-               //
-               //   FAST PATH (instant): VI.ide.setCycle(targetCycle)
-               //     Pre-enumerates all possible input combinations into a
-               //     single sim run, then scrubs the playhead to the cycle
-               //     matching the current UI state. Zero latency. Works only
-               //     for signals derivable from a bounded input space. See
-               //     the VI.ide.setCycle documentation below for the full
-               //     pattern and TLV boilerplate.
-               //
-               // There is no third option. Makerchip does not expose runtime
-               // signal injection (see confirmed-absent section below).
-               //
-               // --- IDE methods that exist but aren't used by this library ---
-               //
-               // ide.session.setCode(code)                   [UNVERIFIED]
-               //   Lower-level write to the editor buffer. Gemini claimed this
-               //   writes silently without triggering a compile — potentially
-               //   very useful for batching multiple edits before a single
-               //   rebuild. NOT CONFIRMED. To verify: call it and watch the
-               //   console for a "Started compilation <id>" log. If no log,
-               //   you have a silent-write primitive.
-               //
-               // ide.editor.compileThis()                    [UNVERIFIED]
-               //   Probably what the Compile button in the IDE calls. Would
-               //   force a rebuild of the current buffer without needing to
-               //   supply new code. Useful if combined with setCode above
-               //   (setCode to stage, compileThis to build).
-               //
-               // ide.viz.setWaveData(data)                   [INFERRED]
-               //   Exists on ide.viz per signal hunt. Probably loads a VCD or
-               //   waveform blob for display. In theory this could display
-               //   fabricated/projected values without recompiling, but the
-               //   expected data shape has not been reverse-engineered and
-               //   any real sim run would clobber the injection. Not worth
-               //   the effort for most use cases.
-               //
-               // ide.viz.setMyCycle(n) / navTlvPane.setCycle(n)  [INFERRED]
-               //   Alternate playhead-scrubbing methods found during the hunt.
-               //   If ide.viz.setCycle doesn't work, try these.
-               //
-               // --- IDE subsystems reachable but unexplored ---
-               //
-               // ide.session.modelManager                    [UNEXPLORED]
-               //   Manages the parse model and compilations. If you want to
-               //   walk the parsed TLV AST, inspect signal definitions
-               //   programmatically, or enumerate pipeline stages, this is
-               //   probably where to start digging.
-               //
-               // ide.session.compilations                    [UNEXPLORED]
-               //   History of compilation results. Could expose timing info,
-               //   error details, or cached traces.
-               //
-               // ide.errorlog                                [UNEXPLORED]
-               //   The CompileErrorLog pane. If you wanted to surface
-               //   SandPiper/Verilator errors inside your viz instead of
-               //   requiring the user to look at the Log tab, this is the
-               //   source.
-               //
-               // ide.graph / ide.navtlv                      [UNEXPLORED]
-               //   The schematic and Nav-TLV panes. Might expose methods to
-               //   highlight specific signals or scopes from viz_js.
-               //
-               // ide.viewer                                  [UNEXPLORED]
-               //   The WaveformViewer. onCycleUpdate callback exists — could
-               //   potentially be hooked to react to waveform scrubbing.
-               //
-               // --- Confirmed-absent capabilities ---
-               //
-               // There is NO runtime signal injection API. A recursive hunt
-               // across ide.viz, ide.viewer, ide.session, and modelManager
-               // for methods matching /^(set|poke|force|override|inject|
-               // write|stim)/ combined with /(sig|signal|val|value|cyc|wave|
-               // data|pin|port)/ returned only:
-               //   - editor.setValue / editor.doc.setValue  (CodeMirror text)
-               //   - canvas.setViewportTransform            (Fabric.js pan/zoom)
-               //   - viz.setCycle / viz.setMyCycle          (playhead scrub)
-               //   - viz.setWaveData                        (display replacement)
-               //   - session.setOnceReturnValue             (EventEmitter internal)
-               //
-               // Makerchip's architecture treats simulations as immutable
-               // artifacts. To change any signal value, you MUST recompile.
-               // There is no third path. Do not waste time hunting for one.
-               //
-               // --- Browser APIs available in viz_js sandbox ---
-               //
-               // fabric.window / fabric.document             [VERIFIED]
-               //   Escape hatch to the real parent DOM. Everything below
-               //   goes through these.
-               //
-               // addEventListener on fabric.document         [VERIFIED]
-               //   mousedown, mouseup, mousemove, click, dblclick,
-               //   contextmenu, wheel all work. This library uses a subset.
-               //
-               // addEventListener on fabric.window           [VERIFIED]
-               //   keydown, keyup, paste, blur, focus all work. This library
-               //   uses keydown.
-               //
-               // localStorage / sessionStorage               [VERIFIED]
-               //   Available via fabric.window.localStorage. Good for small
-               //   persistent state (user preferences, recent values).
-               //
-               // indexedDB                                   [VERIFIED, UNUSED]
-               //   Available via fabric.window.indexedDB. Use for large
-               //   structured datasets (interaction history, lookup tables,
-               //   recorded traces). Unlike localStorage, supports async
-               //   queries and large blobs.
-               //
-               // fetch()                                     [VERIFIED, UNUSED]
-               //   Confirmed working against raw.githubusercontent.com and
-               //   cdn.jsdelivr.net. Enables:
-               //     - Loading JSON config from GitHub (update viz behavior
-               //       without touching the TLV file)
-               //     - Loading entire JS libraries at runtime (D3, Chart.js,
-               //       Three.js) via jsdelivr
-               //     - Posting results to a backend (if CORS permits)
-               //   NOT RECOMMENDED unless you specifically need it — adds
-               //   network dependency and load-time complexity.
-               //
-               // window.open()                               [VERIFIED, UNUSED]
-               //   Can open any URL in a new tab. Combined with localStorage
-               //   or URL params, enables full two-way communication with an
-               //   unrestricted external web app (e.g. a GitHub Pages
-               //   companion that writes results back via postMessage or
-               //   shared localStorage keys).
-               //
-               // paste event                                 [VERIFIED, UNUSED]
-               //   fabric.window.addEventListener("paste", handler). Lets
-               //   users paste clipboard data directly into the viz —
-               //   potentially useful for feeding test vectors, config
-               //   blobs, or JSON state without going through the editor.
-               //
-               // Drag                                        [VERIFIED, UNUSED]
-               //   No dedicated API, but trivially buildable from
-               //   mousedown + mousemove + mouseup with delta tracking.
-               //   Enables draggable components inside the viz.
-               //
-               // --- viz_js parser gotchas (cost real debugging time) ---
-               //
-               // 1. Single quotes are DUAL-PURPOSE in viz_js. A single-quoted
-               //    string that matches the pattern '$name' or '>>N$name' is
-               //    rewritten by SandPiper into a signal reference (see the
-               //    SIGNAL ACCESS section above). A single-quoted string that
-               //    does NOT match gets left alone. This means:
-               //       '$input_a'.asInt()     // signal read — WORKS
-               //       'hello world'          // plain string — WORKS
-               //       "$input_a".asInt()     // NOT rewritten — THROWS
-               //    Apostrophes INSIDE string literals (both `"don't"` and
-               //    Verilog radix like `` `8'h01` ``) crash SandPiper
-               //    regardless of quote style. Use decimal, or build the
-               //    string with String.fromCharCode(39).
-               //
-               // 2. Only init() and render() are recognized as viz_js entry
-               //    points. Arbitrary methods like this._helper() on the
-               //    object literal are NOT callable the way they would be
-               //    on a normal class. Use local closures or assign
-               //    helpers to `self._foo = function() {...}` inside init.
-               //
-               // 3. The \viz_js block must be indented under a pipeline
-               //    @stage scope (e.g. |calc @0). It cannot be placed at
-               //    module top level.
-               //
-               // 4. $signal assignments in TL-Verilog require the $ prefix
-               //    on the left-hand side. Macros that emit pipesignal
-               //    assignments must use $$1 (the double-$ escapes m4 to
-               //    emit a literal $).
-               //
-               // 5. String.prototype.replace treats $ as special. To emit a
-               //    literal $ in the replacement string, use $$. The patch()
-               //    method above handles this.
-               //
-               // 6. `BOGUS_USE($signal) is required to silence unused-signal
-               //    warnings when a signal is only read by viz_js, since
-               //    SandPiper's usage analysis doesn't see into the viz.
-               //
-               // --- Known hazards ---
-               //
-               // 1. NEVER call VI.ide.recompile or VI.ide.patch from init()
-               //    or render(). Each recompile creates a fresh viz instance
-               //    that reruns init(), causing an infinite loop. The
-               //    this._ran guard does NOT help — it's on the old instance
-               //    which gets destroyed. Bridge writes belong in event
-               //    handlers only.
-               //
-               // 2. If your patch regex doesn't match the current source,
-               //    loadProject still "succeeds" with unchanged code and
-               //    triggers a no-op recompile. VI.ide.patch explicitly
-               //    guards against this, but custom recompile flows that
-               //    bypass patch() must check newCode !== oldCode themselves.
-               //
-               // 3. The 3-second failsafe in VI.ide.recompile is essentially
-               //    cosmetic. The real debounce comes from the viz instance
-               //    being replaced by the rebuild. If loadProject ever
-               //    became async or started failing without rebuilding,
-               //    real debouncing would be needed.
-               //
-               // 4. After a recompile, fabric.window.ide should still be
-               //    present in the new viz instance (the parent window
-               //    doesn't change, only the viz iframe content reloads).
-               //    This has not been stress-tested across many recompiles.
-               //    If the second recompile ever silently fails, the first
-               //    thing to check is whether VI.ide.available is still true
-               //    after the rebuild.
-               //
-               // ================================================================
-               // COOKBOOK — common interaction patterns
-               // ================================================================
-               // Short recipes for things you're likely to want to build. These
-               // are sketches, not drop-in code — adapt coordinates, IDs, and
-               // state names to fit your viz. All assume VI is already set up
-               // and these go in the "your init() code" zone below.
-               //
-               // ----------------------------------------------------------------
-               // RECIPE 1: Stateful button with visual feedback
-               // ----------------------------------------------------------------
-               // Click toggles a mode, button color reflects current state.
-               // The trick is that VI.rect() updates in place, so you just
-               // call it again with the new color — no clear/rebuild needed.
-               //
-               //   self.mode = "off";
-               //   const drawBtn = function() {
-               //      const color = self.mode === "on" ? "#3a6" : "#633";
-               //      VI.rect("pwr", 20, 20, 100, 40, color, "#fff");
-               //      VI.label("pwrlbl", self.mode.toUpperCase(), 50, 32, "#fff");
-               //   };
-               //   drawBtn();
-               //   VI.onClick("pwr", 20, 20, 100, 40, function() {
-               //      self.mode = self.mode === "on" ? "off" : "on";
-               //      drawBtn();
-               //      VI.redraw();
-               //   });
-               //
-               // ----------------------------------------------------------------
-               // RECIPE 2: Draggable objects
-               // ----------------------------------------------------------------
-               // VizInteract doesn't expose drag directly, but it's trivial to
-               // build from raw mouse events on fabric.document. Track the
-               // mouse-down position, update on move, release on up. Put this
-               // in init() alongside your VI.onClick calls.
-               //
-               //   self.dragging = null;  // {id, dx, dy} while dragging
-               //   self.objPos = {puck: {x: 100, y: 100}};
-               //
-               //   VI.rect("puck", 100, 100, 60, 60, "#36a");
-               //
-               //   fabric.document.addEventListener("mousedown", function(e) {
-               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
-               //      const p = self.objPos.puck;
-               //      if (pos.x >= p.x && pos.x <= p.x + 60 &&
-               //          pos.y >= p.y && pos.y <= p.y + 60) {
-               //         self.dragging = {id: "puck", dx: pos.x - p.x, dy: pos.y - p.y};
-               //      }
-               //   });
-               //   fabric.document.addEventListener("mousemove", function(e) {
-               //      if (!self.dragging) return;
-               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
-               //      const p = self.objPos[self.dragging.id];
-               //      p.x = pos.x - self.dragging.dx;
-               //      p.y = pos.y - self.dragging.dy;
-               //      // VI.rect stores fabric objects in VI._objects; update
-               //      // position directly on the object for smooth dragging:
-               //      const obj = VI._objects[self.dragging.id];
-               //      if (obj) { obj.set({left: p.x, top: p.y}); }
-               //      VI.redraw();
-               //   });
-               //   fabric.document.addEventListener("mouseup", function(e) {
-               //      self.dragging = null;
-               //   });
-               //
-               // Note: mouseup and mousedown handlers added here are in ADDITION
-               // to the ones the library already installed. Both will fire.
-               // If you need to suppress the library's click zone handling
-               // during a drag, check self.dragging inside your VI.onClick
-               // callbacks and early-return.
-               //
-               // ----------------------------------------------------------------
-               // RECIPE 3: Persistent state across recompiles and reloads
-               // ----------------------------------------------------------------
-               // localStorage survives page reloads AND viz recompiles. Useful
-               // for saving user preferences, last-used values, or interaction
-               // history. Namespace your keys so you don't collide with anyone
-               // else's viz in the same Makerchip project.
-               //
-               //   const KEY = "myviz.count";
-               //   self.count = parseInt(fabric.window.localStorage.getItem(KEY) || "0", 10);
-               //
-               //   VI.onKey("ArrowRight", function() {
-               //      self.count++;
-               //      fabric.window.localStorage.setItem(KEY, String(self.count));
-               //      VI.redraw();
-               //   });
-               //
-               // For larger structured state, JSON.stringify/parse an object.
-               // For very large datasets, use fabric.window.indexedDB instead.
-               //
-               // ----------------------------------------------------------------
-               // RECIPE 4: Parameter dial with live preview + commit
-               // ----------------------------------------------------------------
-               // The canonical "best of both worlds" pattern: drag to preview
-               // the value locally (instant visual feedback), release to
-               // commit the change via recompile. Hybrid of fast-path and
-               // slow-path. This is the whole reason the library has both
-               // VI.redraw and VI.ide.patch.
-               //
-               //   self.previewVal = 128;  // what the UI is showing
-               //   self.committedVal = 128;  // what's in the TLV source
-               //
-               //   // Draw a horizontal slider track
-               //   VI.rect("track", 20, 200, 400, 8, "#444");
-               //   VI.rect("handle", 20 + (self.previewVal * 400 / 255) - 6,
-               //           194, 12, 20, "#3a6");
-               //
-               //   // Update preview during drag
-               //   fabric.document.addEventListener("mousemove", function(e) {
-               //      if (!self.sliderDragging) return;
-               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
-               //      const x = Math.max(20, Math.min(420, pos.x));
-               //      self.previewVal = Math.round((x - 20) * 255 / 400);
-               //      VI._objects.handle.set({left: x - 6});
-               //      VI.label("readout", "preview: " + self.previewVal, 20, 230);
-               //      VI.redraw();
-               //   });
-               //
-               //   // Commit on release — triggers real recompile
-               //   fabric.document.addEventListener("mouseup", function(e) {
-               //      if (!self.sliderDragging) return;
-               //      self.sliderDragging = false;
-               //      if (self.previewVal !== self.committedVal) {
-               //         self.committedVal = self.previewVal;
-               //         VI.ide.patch("my_param", self.previewVal);
-               //      }
-               //   });
-               //
-               //   fabric.document.addEventListener("mousedown", function(e) {
-               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
-               //      if (pos.y >= 194 && pos.y <= 214 &&
-               //          pos.x >= 20  && pos.x <= 420) {
-               //         self.sliderDragging = true;
-               //      }
-               //   });
-               //
-               // ----------------------------------------------------------------
-               // RECIPE 5: Cycle scrubber (timeline at bottom of viz)
-               // ----------------------------------------------------------------
-               // Draw a timeline bar representing all simulated cycles, click
-               // to jump to a specific cycle via VI.ide.setCycle. Combine with
-               // the cycle-enumeration pattern to make an interactive explorer
-               // of a bounded input space.
-               //
-               //   const TIMELINE_X = 20, TIMELINE_Y = 400;
-               //   const TIMELINE_W = 400, TIMELINE_H = 20;
-               //   const TOTAL_CYCLES = 16;  // match your m4_multiverse_limit
-               //
-               //   VI.rect("timeline", TIMELINE_X, TIMELINE_Y,
-               //           TIMELINE_W, TIMELINE_H, "#222", "#666");
-               //
-               //   // Playhead indicator
-               //   const drawHead = function() {
-               //      const cyc = self.getCycle ? self.getCycle() : 0;
-               //      const x = TIMELINE_X + (cyc * TIMELINE_W / TOTAL_CYCLES);
-               //      VI.rect("head", x - 2, TIMELINE_Y - 4,
-               //              4, TIMELINE_H + 8, "#fc0");
-               //   };
-               //   drawHead();
-               //
-               //   VI.onClick("timeline", TIMELINE_X, TIMELINE_Y,
-               //              TIMELINE_W, TIMELINE_H, function(cx, cy) {
-               //      const cyc = Math.floor((cx - TIMELINE_X) * TOTAL_CYCLES / TIMELINE_W);
-               //      VI.ide.setCycle(cyc);
-               //      drawHead();
-               //      VI.redraw();
-               //   });
-               //
-               // Combined with cycle-enumerated inputs (see VI.ide.setCycle
-               // docs above), this gives you a complete interactive exploration
-               // tool: bit-mapped switches on top, signal displays in the
-               // middle, clickable timeline on the bottom, zero recompiles
-               // for any state change within the enumerated space.
-               //
-               // ================================================================
-               // END VizInteract library — your init() code starts here:
+               // HOW TO READ SIGNAL VALUES (the only reliable way):
+               //
+               //   const a = '$input_a'.asInt();    // read TLV $ signal
+               //   const b = '$ready'.asBool();     // as boolean
+               //   const p = '>>1$input_a'.asInt(); // previous cycle
+               //
+               // RULES:
+               //   - SINGLE QUOTES ONLY. Double quotes are NOT rewritten by
+               //     SandPiper and will throw at runtime.
+               //   - Only works inside render(). Reads from event handlers
+               //     return stale values from the last render pass.
+               //   - '*sv_signal' sugar DOES NOT EXIST [CONFIRMED ABSENT].
+               //     nxCompiler hard-crashes on * in string literals.
+               //     Wrap SV signals as TLV signals first:
+               //       $my_cyc[7:0] = *cyc_cnt[7:0];  // in TLV
+               //       '$my_cyc'.asInt()               // in viz_js [VERIFIED]
+               //
+               // RAW SIGNAL ACCESS (when sugar API is unavailable):
+               //   sigVal: for SV signals — strips "SV." prefix internally
+               //     this.sigVal("cyc_cnt")          // reads SV.cyc_cnt [VERIFIED]
+               //     this.sigVal("cyc_cnt", -1)      // previous cycle
+               //   sigRef: for TLV pipeline signals — strips "TLV" prefix
+               //     this.sigRef("|calc$reset", 0)   // reads TLV|calc$reset [VERIFIED]
+               //
+               // SIGNAL NAME FORMAT (from waveData.names):
+               //   TLV pipeline:  "TLV" + "|pipename" + "$signame"
+               //     e.g. $reset in |calc  →  "TLV|calc$reset"
+               //   SV signals:    "SV." + name
+               //     e.g. *cyc_cnt  →  "SV.cyc_cnt"
+               //   Retimed stages: "SV." + SCOPE + "_" + signal + "_a" + N
+               //     e.g. $reset @0 in |calc  →  "SV.CALC_reset_a0"
+               //   Hierarchical:  "SV." + "module.submodule.signal"
+               //
+               // DUMP ALL SIGNAL NAMES (for debugging):
+               //   console.log(Object.keys(self._viz.pane.waveData.signals));
                // ================================================================
 
+               // ================================================================
+               // WaveData API — simulation metadata  [VERIFIED]
+               // ================================================================
+               // Access via self._viz.pane.waveData. All properties read-only.
+               //
+               //   .signals        Object keyed by full signal name → Variable
+               //   .names          Array of all signal name strings
+               //   .startCycle     First simulated cycle (often -5 or 0)
+               //   .endCycle       Last simulated cycle
+               //   .numSignals     Total signal count
+               //   .clkSig         Clock Variable object
+               //   .resetSig       Reset Variable object
+               //   .timescale      {number, unit} e.g. {number:1, unit:'ps'}
+               //   .sandSim        true if this is a Makerchip sandbox sim
+               //
+               // Variable object shape (each entry in .signals):
+               //   .width          Bit width (e.g. 32 for cyc_cnt)
+               //   .scope          'SV', 'TLV|calc', 'SV.pseudo_rand' etc.
+               //   .fullName       Full signal name string
+               //   .notFullName    Signal name without scope prefix
+               //   .nickname       Short single-char internal ID
+               //   .type           'wire'
+               //   .missing        true for the null sentinel signal ("")
+               //   .transitions    Raw waveform data array
+               //   .ports          Verilog port spec e.g. "[31:0]"
+               //
+               // EXAMPLE — auto-sized cycle scrubber:
+               //   const wd = self._viz.pane.waveData;
+               //   const totalCycles = wd.endCycle - wd.startCycle;
+               //
+               // EXAMPLE — enumerate all signal names:
+               //   Object.keys(self._viz.pane.waveData.signals)
+               //     .filter(k => k.startsWith("TLV"))
+               //     .forEach(k => console.log(k));
+               // ================================================================
 
-               // --- demo code (delete this and replace with your own) ---
+               // ================================================================
+               // ScrollWrapper — animation speed  [VERIFIED]
+               // ================================================================
+               // self._viz.pane.scrollWrapper.timestep
+               //   Value is 1 at normal playback speed.
+               //   Fabric animation durations are automatically multiplied by
+               //   this value — slower playback = longer animations.
+               //   READ ONLY from user code. Do not write to it.
+               //   Other keys: 'pane', 'path', 'el' (internal use only).
+               // ================================================================
+
+               // ================================================================
+               // Pane internals — advanced access  [VERIFIED]
+               // ================================================================
+               // self._viz.pane exposes the full VizPane object. Useful fields:
+               //
+               //   .cyc              Current displayed cycle number
+               //   .renderedCyc      Currently rendered cycle (null if unrendered)
+               //   .lastRenderCyc    Previously rendered cycle
+               //   .isLive           Boolean — whether sim is in live mode
+               //   .waveData         WaveData object (see above)
+               //   .scrollWrapper    ScrollWrapper (see above)
+               //   .ide              IDE object (same as fabric.window.ide)
+               //   .session          Session object
+               //   .session.setCode  [INFERRED] May write to editor silently
+               //                     without triggering recompile. Not confirmed.
+               //                     Test: call it and watch for compile log.
+               //   .lastCompileID    String ID of the most recent compilation
+               //   ._renderCnt       Incremented on each render pass
+               //
+               // INTERNAL RENDER LIFECYCLE (do not call directly):
+               //   pane.render()    Runs all \viz_js render() blocks, sets
+               //                    renderedCyc = cyc. Asserts renderedCyc==null.
+               //   pane.unrender()  Tears down canvas, sets renderedCyc = null.
+               //   Always call unrender() before render(). VI.redraw() does this.
+               //
+               // _renderNeeded(immediately):
+               //   Schedules a canvas repaint via setTimeout.
+               //   Pass true for immediate (0ms), false for 30ms delay.
+               //   Used internally by Fabric animation hacks.
+               //   Safer than renderAll() for animation callbacks since it
+               //   checks _renderCnt to avoid painting stale cycles.
+               // ================================================================
+
+               // ================================================================
+               // Browser APIs available in viz_js sandbox  [VERIFIED]
+               // ================================================================
+               // fabric.window / fabric.document    Real parent DOM escape hatch
+               // fabric.document.addEventListener   mousedown, mouseup, mousemove,
+               //                                    click, dblclick, wheel, etc.
+               // fabric.window.addEventListener     keydown, keyup, paste, etc.
+               // fabric.window.localStorage         Persists across recompiles
+               //                                    AND page reloads. Namespace
+               //                                    your keys to avoid collisions.
+               // fabric.window.indexedDB            Large structured data store.
+               //                                    Async. Use for lookup tables,
+               //                                    recorded traces, history.
+               // fetch()                            Works against external URLs.
+               //                                    Confirmed vs github/jsdelivr.
+               // fabric.window.open()               Opens external URL in new tab.
+               //                                    Enables companion web app pattern.
+               // ================================================================
+
+               // ================================================================
+               // Confirmed-absent capabilities  [ABSENT]
+               // ================================================================
+               // '*signal'.asInt()     Crashes nxCompiler. Does not exist.
+               //                       Wrap as $sig = *sv_sig; first.
+               // Runtime signal inject No API exists to change signal values
+               //                       without recompiling. Makerchip treats
+               //                       simulations as immutable artifacts.
+               //                       Your only options are:
+               //                         SLOW: VI.ide.patch() → recompile (~2-5s)
+               //                         FAST: VI.ide.setCycle() → scrub playhead
+               // ================================================================
+
+               // ================================================================
+               // END VizInteract v2.0 — your init() code starts here
+               // ================================================================
+
+               // --- demo: stateful counter with hover button ---
                self.count = 0;
                self.mode  = "idle";
 
                VI.onKey("ArrowRight", function() {
                   self.count++;
-                  VI.label("count", "count: " + self.count, 20, 110, "#6f6");
                   VI.redraw();
                });
 
                VI.onKey("ArrowLeft", function() {
                   self.count--;
-                  VI.label("count", "count: " + self.count, 20, 110, "#6f6");
                   VI.redraw();
                });
+            },
 
-               VI.onClick("reset_btn", 20, 160, 120, 40, function() {
-                  self.count = 0;
-                  VI.label("count", "count: " + self.count, 20, 110, "#6f6");
-                  VI.redraw();
-               });
-
-               VI.onHover("reset_btn", 20, 160, 120, 40,
-                  function() {
-                     self.mode = "hover";
-                     VI.rect("reset_btn", 20, 160, 120, 40, "#366");
-                     VI.redraw();
-                  },
-                  function() {
-                     self.mode = "idle";
-                     VI.rect("reset_btn", 20, 160, 120, 40, "#444");
-                     VI.redraw();
-                  }
-               );
+            // ================================================================
+            // onTraceData()  [VERIFIED]
+            // ================================================================
+            // Called automatically when new waveform data arrives (after each
+            // recompile), BEFORE render(). The viz is not yet rendered when
+            // this fires — do not touch Fabric objects here.
+            //
+            // Use to reset state that depends on simulation data, so stale
+            // values from a previous sim run don't bleed into the new one.
+            //
+            // Define it at the same level as init() and render() in the
+            // \viz_js block object literal.
+            // ================================================================
+            onTraceData() {
+               // Reset any cached signal-derived state here.
+               // Example:
+               //   this.myCache = {};
+               //   this.myInitDone = false;
             },
 
             render() {
@@ -1008,27 +651,29 @@
                const VI = this._VI; if (!VI) return;
                VI.clearAll();
                // ================================================================
+               // After clearAll(), re-register all onClick/onHover zones here.
+               // Labels and rects are recreated fresh each render pass.
+               // ================================================================
 
-
-               // --- demo code (delete this and replace with your own) ---
-               VI.label("title", "VizInteract v1.0 demo",           20, 20,  "#ffcc00", 18);
-               VI.label("hint1", "arrow keys -> count up/down",      20, 55,  "#888",    13);
-               VI.label("hint2", "click reset button -> zero",       20, 75,  "#888",    13);
-               VI.label("count", "count: " + (this.count || 0),      20, 110, "#6f6",    16);
-               VI.label("mode",  "mode: "  + (this.mode  || "idle"), 20, 135, "#6f6",    16);
-
-               VI.rect("reset_btn", 20, 160, 120, 40,
-                  this.mode === "hover" ? "#366" : "#444", "#fff"
-               );
-               VI.label("reset_lbl", "RESET", 55, 175, "#fff", 14);
-
-               // Re-register zones after clearAll wiped them
                const self = this;
-               VI.onClick("reset_btn", 20, 160, 120, 40, function() {
+
+               // --- demo UI ---
+               VI.label("title", "VizInteract v2.0",              20, 20,  "#ffcc00", 18);
+               VI.label("hint1", "ArrowLeft / ArrowRight = count", 20, 55,  "#888",    13);
+               VI.label("hint2", "click button = reset",           20, 75,  "#888",    13);
+               VI.label("count", "count: " + (self.count || 0),    20, 110, "#6f6",    16);
+               VI.label("mode",  "mode: "  + (self.mode  || "idle"),20, 135,"#6f6",    16);
+
+               VI.rect("btn", 20, 165, 120, 40,
+                  self.mode === "hover" ? "#366" : "#444", "#fff");
+               VI.label("btnlbl", "RESET", 55, 180, "#fff", 14);
+
+               VI.onClick("btn", 20, 165, 120, 40, function() {
                   self.count = 0;
                   VI.redraw();
                });
-               VI.onHover("reset_btn", 20, 160, 120, 40,
+
+               VI.onHover("btn", 20, 165, 120, 40,
                   function() { self.mode = "hover"; VI.redraw(); },
                   function() { self.mode = "idle";  VI.redraw(); }
                );
@@ -1036,3 +681,250 @@
 
 \SV
    endmodule
+
+// =============================================================================
+// PATTERNS — common interaction recipes
+// =============================================================================
+//
+// ----------------------------------------------------------------
+// PATTERN 1: Cycle enumeration (instant UI, zero recompiles)
+// ----------------------------------------------------------------
+// Pre-compute every possible UI state in a single sim run by wiring
+// UI-driven signals to *cyc_cnt bits. Then scrub the playhead to
+// the cycle matching current UI state.
+//
+// In TLV:
+//   $switch_a[1:0] = *cyc_cnt[1:0];
+//   $switch_b[1:0] = *cyc_cnt[3:2];
+//   *passed = *cyc_cnt > 16;   // run long enough to cover all states
+//
+// In init():
+//   self.swA = 0; self.swB = 0;
+//   self._teleport = function() {
+//      const cyc = self.swA | (self.swB << 2);
+//      VI.ide.setCycle(cyc);
+//      VI.redraw();
+//   };
+//   VI.onKey("ArrowRight", function() {
+//      self.swA = (self.swA + 1) % 4;
+//      self._teleport();
+//   });
+//
+// In render():
+//   const a = '$switch_a'.asInt();   // reads at current playhead cycle
+//   const r = '$result'.asInt();
+//   VI.label("r", "result: " + r, 20, 80, "#6f6", 20);
+//
+// TRADEOFFS:
+//   + Zero-latency updates, no recompile
+//   + Works for any signal derived from UI-driven inputs
+//   - Input space limited: 8 bits = 256 cycles (fine), 16 = 65k (slow)
+//   - Doesn't work for state-dependent signals (registers, counters)
+//
+// ----------------------------------------------------------------
+// PATTERN 2: Parameter dial (preview + commit)
+// ----------------------------------------------------------------
+// Drag to preview instantly, release to commit via recompile.
+//
+//   self.previewVal = 128;
+//   self.committedVal = 128;
+//   self.sliderDragging = false;
+//
+//   fabric.document.addEventListener("mousemove", function(e) {
+//      if (!self.sliderDragging) return;
+//      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+//      self.previewVal = Math.round((pos.x - 20) * 255 / 400);
+//      VI._objects.handle.set({left: pos.x - 6});
+//      VI.label("readout", "preview: " + self.previewVal, 20, 230);
+//      VI.redraw();
+//   });
+//
+//   fabric.document.addEventListener("mouseup", function(e) {
+//      if (!self.sliderDragging) return;
+//      self.sliderDragging = false;
+//      if (self.previewVal !== self.committedVal) {
+//         self.committedVal = self.previewVal;
+//         VI.ide.patch("my_param", self.previewVal);  // triggers recompile
+//      }
+//   });
+//
+// ----------------------------------------------------------------
+// PATTERN 3: Persistent state across recompiles
+// ----------------------------------------------------------------
+//   const KEY = "myviz.mystate";
+//   self.count = parseInt(
+//      fabric.window.localStorage.getItem(KEY) || "0", 10
+//   );
+//   VI.onKey("ArrowRight", function() {
+//      self.count++;
+//      fabric.window.localStorage.setItem(KEY, String(self.count));
+//      VI.redraw();
+//   });
+//
+// ----------------------------------------------------------------
+// PATTERN 4: Auto-sized cycle scrubber
+// ----------------------------------------------------------------
+//   const wd    = self._viz.pane.waveData;
+//   const START = wd.startCycle;
+//   const END   = wd.endCycle;
+//   const W     = 400;
+//   const TY    = 400;
+//
+//   VI.onClick("timeline", 20, TY, W, 20, function(cx) {
+//      const cyc = Math.round(START + (cx - 20) * (END - START) / W);
+//      VI.ide.setCycle(cyc);
+//      VI.redraw();
+//   });
+//
+//   // In render():
+//   VI.rect("timeline", 20, TY, W, 20, "#222", "#666");
+//   const x = 20 + (self.getCycle() - START) * W / (END - START);
+//   VI.rect("head", x - 2, TY - 4, 4, 28, "#fc0");
+//
+// ----------------------------------------------------------------
+// PATTERN 5: Draggable objects
+// ----------------------------------------------------------------
+//   self.dragging = null;
+//   self.objPos = {puck: {x: 100, y: 100}};
+//   VI.rect("puck", 100, 100, 60, 60, "#36a");
+//
+//   fabric.document.addEventListener("mousedown", function(e) {
+//      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+//      const p = self.objPos.puck;
+//      if (pos.x >= p.x && pos.x <= p.x+60 &&
+//          pos.y >= p.y && pos.y <= p.y+60) {
+//         self.dragging = {id:"puck", dx:pos.x-p.x, dy:pos.y-p.y};
+//      }
+//   });
+//   fabric.document.addEventListener("mousemove", function(e) {
+//      if (!self.dragging) return;
+//      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+//      self.objPos.puck.x = pos.x - self.dragging.dx;
+//      self.objPos.puck.y = pos.y - self.dragging.dy;
+//      VI._objects.puck.set({
+//         left: self.objPos.puck.x,
+//         top:  self.objPos.puck.y
+//      });
+//      VI.redraw();
+//   });
+//   fabric.document.addEventListener("mouseup", function() {
+//      self.dragging = null;
+//   });
+//
+// ----------------------------------------------------------------
+// PATTERN 6: Dynamic signal enumeration
+// ----------------------------------------------------------------
+// Iterate all signals to build a custom signal browser or auto-
+// generate a display without knowing signal names at author-time.
+//
+//   const wd   = self._viz.pane.waveData;
+//   const tlvs = Object.keys(wd.signals)
+//                  .filter(k => k.startsWith("TLV"));
+//   tlvs.forEach(function(name, i) {
+//      const sig = wd.signals[name];
+//      // sig.notFullName  — short name
+//      // sig.width        — bit width
+//      // Read value via raw API (sugar API needs static names):
+//      //   self.sigRef(name.replace("TLV",""), 0).asInt()
+//      VI.label("sig_" + i, sig.notFullName + " [" + sig.width + "]",
+//               20, 20 + i * 20, "#aaa", 12);
+//   });
+//
+// =============================================================================
+// GOTCHAS — things that have burned people
+// =============================================================================
+//
+// 1. SINGLE QUOTES for signal refs, DOUBLE QUOTES for strings.
+//    '$foo'.asInt()   → SandPiper rewrites → works
+//    "$foo".asInt()   → plain string       → throws at runtime
+//
+// 2. '*signal' sugar DOES NOT EXIST. nxCompiler crashes on it.
+//    Wrap: $my_sig[N:0] = *sv_sig[N:0]; then use '$my_sig'.asInt().
+//
+// 3. Apostrophes and Verilog radix literals crash SandPiper.
+//    "don't"   → crash. Use String.fromCharCode(39).
+//    "8'h01"   → crash. Use decimal (1) instead.
+//
+// 4. String.prototype.replace treats $ as special.
+//    Use $$ to emit a literal $ in replacement strings.
+//    VI.ide.patch() handles this for you.
+//
+// 5. NEVER call VI.ide.recompile/patch from init() or render().
+//    Recompile → new viz instance → reruns init() → infinite loop.
+//    Bridge writes belong in event handlers only.
+//
+// 6. clearAll() wipes _clickZones and _hoverZones.
+//    Re-register all onClick/onHover calls inside render() after clearAll().
+//    _hotkeys are NOT cleared by clearAll() — register once in init().
+//
+// 7. VI.redraw() not requestRenderAllBound().
+//    requestRenderAllBound() only repaints. It does NOT re-run render().
+//    VI.redraw() calls pane.unrender() + pane.render() + renderAll().
+//
+// 8. unrender() before render() — always. VI.redraw() does this.
+//    Calling pane.render() without unrender() first:
+//      - Throws a failed assertion (Utils.assert)
+//      - Silently duplicates Fabric objects (memory leak)
+//
+// 9. Signal reads only work in render(), not in event handlers.
+//    '$foo'.asInt() in a click handler reads the value from the last
+//    render pass, which may be stale. Always read in render().
+//
+// 10. $BOGUS_USE($signal) silences unused-signal warnings.
+//     SandPiper's usage analysis doesn't see into viz_js blocks.
+//     Add this for any signal only consumed by viz_js.
+//
+// 11. Only init() and render() are official viz_js entry points.
+//     Arbitrary methods on the object literal are not callable as
+//     this._helper(). Use closures or assign to self._foo in init().
+//     onTraceData() is also a valid entry point [VERIFIED].
+//
+// 12. The wait() helper in staticSandboxEnvFn has a bug in the source:
+//     setTimeout(resolve, ms) should be setTimeout(resolve, delay).
+//     Don't use the built-in wait() — use a manual Promise instead:
+//       new Promise(resolve => setTimeout(resolve, 500))
+//
+// =============================================================================
+// UNVERIFIED / FUTURE INVESTIGATION
+// =============================================================================
+//
+// session.setCode(code)  [INFERRED, UNVERIFIED]
+//   Lives at self._viz.pane.session.setCode. May write to the editor
+//   buffer silently without triggering a recompile. If confirmed, this
+//   enables batching multiple edits before a single rebuild.
+//   To test: call it and watch for "Started compilation" in console.
+//   If no log appears, you have a silent-write primitive.
+//
+// ide.editor.compileThis()  [UNVERIFIED]
+//   Probably what the IDE Compile button calls. Would force a rebuild
+//   of the current buffer without supplying new code. Useful combined
+//   with silent setCode above.
+//
+// ide.viz.setWaveData(data)  [INFERRED]
+//   Exists on ide.viz. Probably loads a VCD blob for display. Could
+//   in theory display fabricated values without recompiling, but the
+//   expected data shape is unknown and any real sim would clobber it.
+//
+// ide.viewer onCycleUpdate callback  [UNEXPLORED]
+//   ide.viewer exists and may expose a hook to react to waveform
+//   scrubbing from the waveform pane. Could sync viz state to the
+//   waveform viewer's playhead.
+//
+// ide.graph / ide.navtlv  [UNEXPLORED]
+//   Schematic and Nav-TLV panes. May expose methods to highlight
+//   specific signals or scopes from viz_js code.
+//
+// positionAncestorObject / upMap / ancestorMap  [UNEXPLORED]
+//   VizElement has coordinate mapping methods for translating positions
+//   between nested viz scopes. Useful for multi-scope designs where
+//   a child scope needs to position an object in a parent scope's
+//   coordinate system.
+//
+// VizPane.Grid  [AVAILABLE, UNUSED BY THIS LIBRARY]
+//   Built-in class for 2D TLV hierarchy visualization using a canvas
+//   image where each pixel = one cell. Accessible as this.global.Grid.
+//   Constructor: new Grid(top, context, width, height, imageOptions)
+//   Methods: setCellColor(x, y, color), getFabricObject(), toImage()
+//   Good for pipeline diagrams, memory maps, 2D signal heatmaps.
+//
+// =============================================================================
