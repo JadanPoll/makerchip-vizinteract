@@ -1,39 +1,39 @@
-// =============================================================================
-// VizInteract v1.0 + Makerchip IDE Bridge
-// =============================================================================
-// A paste-once library for TL-Verilog \viz_js blocks that adds:
-//   - Mouse / keyboard input with proper focus management
-//   - Hit-testable click and hover zones
-//   - In-place object updates (no flicker)
-//   - Instant redraw without stepping the simulation
-//   - Synchronous read/write access to Makerchip's editor buffer
-//   - Programmatic recompile triggering
-//
-// USAGE:
-//   Paste the entire `init()` library block (between the START and END
-//   markers) at the top of your own init(). Paste the two-line render()
-//   boilerplate at the top of your render(). Write your code after the
-//   markers. Do not modify anything inside the markers.
-//
-// STATUS TAGS USED IN THIS FILE:
-//   [VERIFIED]    Tested end-to-end in the Makerchip web IDE.
-//   [INFERRED]    Exists per method-name probing; behavior not tested.
-//   [UNVERIFIED]  Claimed in source dumps / docs but not confirmed in practice.
-//   [ABSENT]      Actively searched for and confirmed not to exist.
-//   [UNUSED]      Available and known to work, but not wired into the library.
-//
-// STABILITY:
-//   VizInteract's input/drawing layer is built on eternal browser APIs and
-//   should work indefinitely. The IDE bridge is built on UNDOCUMENTED
-//   Makerchip internals and may break on any Makerchip update. If the bridge
-//   breaks, VI.ide.available will be false and input/drawing still work.
-// =============================================================================
-
 \m4_TLV_version 1d: tl-x.org
 \SV
    m4_makerchip_module
 
 \TLV
+   // =============================================================================
+   // VizInteract v1.0 + Makerchip IDE Bridge
+   // =============================================================================
+   // A paste-once library for TL-Verilog \viz_js blocks that adds:
+   //   - Mouse / keyboard input with proper focus management
+   //   - Hit-testable click and hover zones
+   //   - In-place object updates (no flicker)
+   //   - Instant redraw without stepping the simulation
+   //   - Synchronous read/write access to Makerchip's editor buffer
+   //   - Programmatic recompile triggering
+   //
+   // USAGE:
+   //   Paste the entire `init()` library block (between the START and END
+   //   markers) at the top of your own init(). Paste the two-line render()
+   //   boilerplate at the top of your render(). Write your code after the
+   //   markers. Do not modify anything inside the markers.
+   //
+   // STATUS TAGS USED IN THIS FILE:
+   //   [VERIFIED]    Tested end-to-end in the Makerchip web IDE.
+   //   [INFERRED]    Exists per method-name probing; behavior not tested.
+   //   [UNVERIFIED]  Claimed in source dumps / docs but not confirmed in practice.
+   //   [ABSENT]      Actively searched for and confirmed not to exist.
+   //   [UNUSED]      Available and known to work, but not wired into the library.
+   //
+   // STABILITY:
+   //   VizInteract's input/drawing layer is built on eternal browser APIs and
+   //   should work indefinitely. The IDE bridge is built on UNDOCUMENTED
+   //   Makerchip internals and may break on any Makerchip update. If the bridge
+   //   breaks, VI.ide.available will be false and input/drawing still work.
+   // =============================================================================
+
    |calc
       @0
          $reset = *reset;
