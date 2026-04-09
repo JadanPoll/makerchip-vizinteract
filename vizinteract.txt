@@ -392,19 +392,62 @@
                };
 
                // ----------------------------------------------------------------
-               // VI.ide.setCycle(n)  [INFERRED — not tested in practice]
-               // Discovered via recursive method-name hunt on ide.viz. Probably
-               // scrubs the global viz playhead to cycle n without stepping
-               // the simulation.
+               // VI.ide.setCycle(n)  [VERIFIED]
+               // Scrubs the global viz playhead to cycle n without stepping
+               // the simulation. Combined with the sugar API (see SIGNAL
+               // ACCESS section below), this is how you build "instant"
+               // interactive UIs: setCycle moves the playhead, redraw causes
+               // render() to rerun, and the sugar API inside render() reads
+               // values at the new cycle automatically. No offset math.
                //
-               // THE CYCLE-ENUMERATION PATTERN (instant $signal updates):
-               // This is the ONLY way to get UI inputs to change $signal values
-               // without triggering a full recompile. The idea: don't try to
-               // "inject" values into a running sim (that capability doesn't
-               // exist — see the confirmed-absent notes). Instead, pre-compute
-               // every possible input combination in a single sim run, then
-               // scrub the playhead to whichever cycle represents the current
-               // UI state.
+               // ================================================================
+               // CANONICAL INTERACTIVE UPDATE PATTERN (verified working)
+               // ================================================================
+               // This is THE idiom for interactive viz_js. Memorize it. Every
+               // failed attempt in this library's development history came
+               // from deviating from it.
+               //
+               // In init(), define a teleport helper and bind it to events:
+               //
+               //    self.targetCycle = 0;
+               //    self._teleport = function(n) {
+               //       self.targetCycle = n;
+               //       VI.ide.setCycle(n);   // move the playhead
+               //       VI.redraw();          // causes render() to rerun
+               //    };
+               //    VI.onKey("w", function() {
+               //       self._teleport((self.targetCycle + 1) % 4);
+               //    });
+               //
+               // In render(), read signals with the sugar API (see below):
+               //
+               //    const a = '$input_a'.asInt();
+               //    const r = '$result'.asInt();
+               //    VI.label("a", "A: " + a, 20, 100, "#6f6", 24);
+               //    VI.label("r", "R: " + r, 20, 140, "#ffcc00", 24);
+               //
+               // RULES:
+               //   - Signal READS go in render() only, never in event handlers.
+               //     The sugar API reads at the viz's current displayed cycle,
+               //     which is whatever setCycle most recently set.
+               //   - Event handlers call setCycle + redraw. That's it. They
+               //     do NOT read signals, do NOT update labels directly.
+               //   - render() is where all label/rect drawing happens, using
+               //     values freshly read via the sugar API.
+               //
+               // WHY: render() reruns on every redraw() call and is the only
+               // context where the sugar API resolves correctly. Reading from
+               // an event handler reads stale values from whenever render()
+               // last ran, which is why earlier versions of this library saw
+               // labels showing the wrong data after clicks.
+               //
+               // ================================================================
+               // THE CYCLE-ENUMERATION PATTERN (what makes this interactive)
+               // ================================================================
+               // setCycle only helps if your sim actually contains a cycle
+               // whose values match the UI state you want to display. The
+               // trick is to pre-compute every possible UI state in a single
+               // sim run by wiring UI-driven signals to *cyc_cnt bits:
                //
                // 1. In your TLV, wire the UI-driven signals to bits of *cyc_cnt:
                //
@@ -420,18 +463,14 @@
                //
                //       *passed = *cyc_cnt > 16;
                //
-               // 3. In your JS event handler, compute the target cycle from
-               //    the current UI state and scrub to it:
+               // 3. Compute the target cycle from UI state and teleport:
                //
-               //       VI.onClick("sw_a", ..., function() {
-               //          self.swA = (self.swA + 1) % 4;
-               //          const targetCycle = self.swA | (self.swB << 2);
-               //          VI.ide.setCycle(targetCycle);
-               //          VI.redraw();
-               //       });
+               //       const targetCycle = self.swA | (self.swB << 2);
+               //       self._teleport(targetCycle);
                //
-               // 4. In render(), read signal values normally — they'll reflect
-               //    whatever cycle the playhead is currently on.
+               // 4. render() reads $switch_a, $switch_b, and anything derived
+               //    from them (like $result) via the sugar API. The values
+               //    come from whatever cycle the playhead is on.
                //
                // TRADEOFFS:
                //   + Zero-latency updates, no recompile needed
@@ -440,19 +479,7 @@
                //     (fine), 16 = 65k (slow to sim), 32+ = not feasible
                //   - Doesn't work for signals derived from state that depends
                //     on history (registers, counters, memory) — those need
-               //     real sim stepping or recompile
-               //
-               // FALLBACK IF setCycle DOESN'T WORK:
-               //   Use manual offset math in your read function:
-               //     const offset = targetCycle - self.getCycle();
-               //     const val = self.sigVal(ref, offset);
-               //   This is what earlier versions of this research used and
-               //   is verified working, just less clean.
-               //
-               // TO VERIFY setCycle: in DevTools console, run
-               //   fabric.window.ide.viz.setCycle(3);
-               //   console.log(fabric.window.ide.viz.cyc);
-               // If cyc became 3, it works. If not, use the fallback above.
+               //     real sim stepping or recompile via VI.ide.patch
                // ----------------------------------------------------------------
                VI.ide.setCycle = function(n) {
                   if (VI.ide.available && VI.ide._ide.viz &&
@@ -467,6 +494,81 @@
                   return false;
                };
 
+               // ================================================================
+               // SIGNAL ACCESS — the sugar API
+               // ================================================================
+               // This is the most important thing in this file. Every failed
+               // attempt to read signals from viz_js came from not knowing
+               // this, and no amount of documentation searching will lead an
+               // LLM to it — it's only visible in the Game of Life example
+               // shipped with Makerchip. Read this section carefully.
+               //
+               // HOW TO READ SIGNAL VALUES (the only way that works):
+               //
+               //    const a = '$input_a'.asInt();      // read as integer
+               //    const b = '$ready'.asBool();       // read as boolean
+               //    const p = '>>1$input_a'.asInt();   // previous cycle
+               //
+               // THE RULE: signal references are SINGLE-QUOTED STRING LITERALS
+               // with the full TL-Verilog signal name inside. SandPiper's
+               // preprocessor scans viz_js code for single-quoted strings
+               // matching the pattern '$name' or '>>N$name' and rewrites them
+               // into real signal lookups BEFORE the code runs. Methods like
+               // .asInt() and .asBool() are not real String methods — they
+               // are part of the rewritten code.
+               //
+               // CRITICAL: DOUBLE QUOTES DO NOT WORK.
+               //
+               //    '$input_a'.asInt()   // YES — preprocessor rewrites this
+               //    "$input_a".asInt()   // NO — plain string, throws at runtime
+               //
+               // If you write the signal name with double quotes, SandPiper
+               // does not rewrite it, .asInt() doesn't exist on plain strings,
+               // and you get a runtime exception. This has burned multiple
+               // LLMs and wasted hours of debugging. ALWAYS use single quotes
+               // around signal references.
+               //
+               // This is in direct tension with the general viz_js advice to
+               // "use double quotes because single quotes are reserved for
+               // TLV signal references." Both statements are true — single
+               // quotes ARE reserved, and they're reserved BECAUSE they mean
+               // "signal reference" when you use them this way. The correct
+               // combined rule is:
+               //
+               //    - Signal reference: '$foo'     (single quotes, required)
+               //    - Plain string:     "hello"   (double quotes, required)
+               //    - Apostrophe in a string literal: NEVER. Crashes SandPiper.
+               //      Use String.fromCharCode(39) or restructure.
+               //    - Verilog radix literals like `8'h01` in strings: NEVER,
+               //      same reason. Use decimal.
+               //
+               // AVAILABLE METHODS (from the Game of Life example and testing):
+               //    .asInt()   — verified, returns Number for multi-bit signals
+               //    .asBool()  — verified, returns boolean for 1-bit signals
+               //    .asNum()   — possibly exists as alternate name for asInt,
+               //                 untested but safe fallback in try/catch
+               //
+               // WHERE YOU CAN CALL IT:
+               //   - Inside render()                      [VERIFIED WORKING]
+               //   - Inside event handlers                [DOES NOT WORK — reads stale]
+               //   - Inside setTimeout/setInterval        [UNTESTED]
+               //
+               // Always read in render(). To update after user interaction,
+               // your event handler should call VI.ide.setCycle(n) and
+               // VI.redraw(), which causes render() to rerun, which is where
+               // the fresh read happens. See the CANONICAL INTERACTIVE
+               // UPDATE PATTERN above for the full idiom.
+               //
+               // WHY THE SUGAR API AND NOT sigRef/sigVal:
+               // The raw sigRef/sigVal methods exist on the viz instance but
+               // using them directly requires knowing the internal signal
+               // name, which includes pipeline scope encoding and is not the
+               // name you wrote in your TLV source. The sugar API handles all
+               // of that via the preprocessor. Don't try to use sigRef/sigVal
+               // unless you already know exactly what string to pass it, and
+               // you won't know unless you dump the internal signal table
+               // (which is undocumented and varies by design).
+               //
                // ================================================================
                // ADDITIONAL CAPABILITIES — available but not wired in
                // ================================================================
@@ -619,12 +721,18 @@
                //
                // --- viz_js parser gotchas (cost real debugging time) ---
                //
-               // 1. Single quotes inside \viz_js are reserved for TLV signal
-               //    references. Use double quotes or template literals for
-               //    strings. Apostrophes in string literals — e.g. Verilog
-               //    radix notation like `8'h01` — crash SandPiper. Use
-               //    decimal values instead, or concatenate with
-               //    String.fromCharCode(39).
+               // 1. Single quotes are DUAL-PURPOSE in viz_js. A single-quoted
+               //    string that matches the pattern '$name' or '>>N$name' is
+               //    rewritten by SandPiper into a signal reference (see the
+               //    SIGNAL ACCESS section above). A single-quoted string that
+               //    does NOT match gets left alone. This means:
+               //       '$input_a'.asInt()     // signal read — WORKS
+               //       'hello world'          // plain string — WORKS
+               //       "$input_a".asInt()     // NOT rewritten — THROWS
+               //    Apostrophes INSIDE string literals (both `"don't"` and
+               //    Verilog radix like `` `8'h01` ``) crash SandPiper
+               //    regardless of quote style. Use decimal, or build the
+               //    string with String.fromCharCode(39).
                //
                // 2. Only init() and render() are recognized as viz_js entry
                //    points. Arbitrary methods like this._helper() on the
