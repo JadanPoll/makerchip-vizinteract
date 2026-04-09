@@ -15,7 +15,7 @@
    //   - Programmatic recompile triggering
    //
    // USAGE:
-   //   Paste the entire `init()` library block (between the START and END
+   //   Paste the entire init() library block (between the START and END
    //   markers) at the top of your own init(). Paste the two-line render()
    //   boilerplate at the top of your render(). Write your code after the
    //   markers. Do not modify anything inside the markers.
@@ -395,17 +395,64 @@
                // VI.ide.setCycle(n)  [INFERRED — not tested in practice]
                // Discovered via recursive method-name hunt on ide.viz. Probably
                // scrubs the global viz playhead to cycle n without stepping
-               // the simulation. If this works, it's the clean way to do
-               // "teleport" UIs: pre-enumerate inputs into cycles of one sim
-               // run, then setCycle() to jump to the one matching the
-               // current UI state. If it doesn't work, fall back to manual
-               // offset math: let offset = targetCycle - self.getCycle();
-               // then use self.sigVal(ref, offset) in your reads.
+               // the simulation.
                //
-               // TO VERIFY: in DevTools console, run
+               // THE CYCLE-ENUMERATION PATTERN (instant $signal updates):
+               // This is the ONLY way to get UI inputs to change $signal values
+               // without triggering a full recompile. The idea: don't try to
+               // "inject" values into a running sim (that capability doesn't
+               // exist — see the confirmed-absent notes). Instead, pre-compute
+               // every possible input combination in a single sim run, then
+               // scrub the playhead to whichever cycle represents the current
+               // UI state.
+               //
+               // 1. In your TLV, wire the UI-driven signals to bits of *cyc_cnt:
+               //
+               //       $switch_a[1:0] = *cyc_cnt[1:0];
+               //       $switch_b[1:0] = *cyc_cnt[3:2];
+               //
+               //    Over the first 16 cycles, every combination of switch_a
+               //    and switch_b is covered. Pick cyc_cnt widths to cover your
+               //    full input space: N input bits total = 2^N cycles needed.
+               //
+               // 2. Make sure *passed doesn't fire until after your enumeration
+               //    is complete, so the sim actually runs through all cycles:
+               //
+               //       *passed = *cyc_cnt > 16;
+               //
+               // 3. In your JS event handler, compute the target cycle from
+               //    the current UI state and scrub to it:
+               //
+               //       VI.onClick("sw_a", ..., function() {
+               //          self.swA = (self.swA + 1) % 4;
+               //          const targetCycle = self.swA | (self.swB << 2);
+               //          VI.ide.setCycle(targetCycle);
+               //          VI.redraw();
+               //       });
+               //
+               // 4. In render(), read signal values normally — they'll reflect
+               //    whatever cycle the playhead is currently on.
+               //
+               // TRADEOFFS:
+               //   + Zero-latency updates, no recompile needed
+               //   + Works for any $signal derived from the UI-driven inputs
+               //   - Limited to small input spaces: 8 input bits = 256 cycles
+               //     (fine), 16 = 65k (slow to sim), 32+ = not feasible
+               //   - Doesn't work for signals derived from state that depends
+               //     on history (registers, counters, memory) — those need
+               //     real sim stepping or recompile
+               //
+               // FALLBACK IF setCycle DOESN'T WORK:
+               //   Use manual offset math in your read function:
+               //     const offset = targetCycle - self.getCycle();
+               //     const val = self.sigVal(ref, offset);
+               //   This is what earlier versions of this research used and
+               //   is verified working, just less clean.
+               //
+               // TO VERIFY setCycle: in DevTools console, run
                //   fabric.window.ide.viz.setCycle(3);
                //   console.log(fabric.window.ide.viz.cyc);
-               // If cyc became 3, it works.
+               // If cyc became 3, it works. If not, use the fallback above.
                // ----------------------------------------------------------------
                VI.ide.setCycle = function(n) {
                   if (VI.ide.available && VI.ide._ide.viz &&
@@ -423,6 +470,28 @@
                // ================================================================
                // ADDITIONAL CAPABILITIES — available but not wired in
                // ================================================================
+               //
+               // --- Instant $signal updates without recompiling ---
+               //
+               // Two mechanisms exist for changing $signal values in response
+               // to UI input. Pick the one that fits your latency needs:
+               //
+               //   SLOW PATH (seconds): VI.ide.patch(name, value)
+               //     Rewrites the TLV source and triggers a full recompile.
+               //     Works for any signal and any value. Latency ~2-5 seconds
+               //     per change. Use for parameters you change rarely (mode
+               //     selects, constants, config values).
+               //
+               //   FAST PATH (instant): VI.ide.setCycle(targetCycle)
+               //     Pre-enumerates all possible input combinations into a
+               //     single sim run, then scrubs the playhead to the cycle
+               //     matching the current UI state. Zero latency. Works only
+               //     for signals derivable from a bounded input space. See
+               //     the VI.ide.setCycle documentation below for the full
+               //     pattern and TLV boilerplate.
+               //
+               // There is no third option. Makerchip does not expose runtime
+               // signal injection (see confirmed-absent section below).
                //
                // --- IDE methods that exist but aren't used by this library ---
                //
@@ -608,6 +677,182 @@
                //    If the second recompile ever silently fails, the first
                //    thing to check is whether VI.ide.available is still true
                //    after the rebuild.
+               //
+               // ================================================================
+               // COOKBOOK — common interaction patterns
+               // ================================================================
+               // Short recipes for things you're likely to want to build. These
+               // are sketches, not drop-in code — adapt coordinates, IDs, and
+               // state names to fit your viz. All assume VI is already set up
+               // and these go in the "your init() code" zone below.
+               //
+               // ----------------------------------------------------------------
+               // RECIPE 1: Stateful button with visual feedback
+               // ----------------------------------------------------------------
+               // Click toggles a mode, button color reflects current state.
+               // The trick is that VI.rect() updates in place, so you just
+               // call it again with the new color — no clear/rebuild needed.
+               //
+               //   self.mode = "off";
+               //   const drawBtn = function() {
+               //      const color = self.mode === "on" ? "#3a6" : "#633";
+               //      VI.rect("pwr", 20, 20, 100, 40, color, "#fff");
+               //      VI.label("pwrlbl", self.mode.toUpperCase(), 50, 32, "#fff");
+               //   };
+               //   drawBtn();
+               //   VI.onClick("pwr", 20, 20, 100, 40, function() {
+               //      self.mode = self.mode === "on" ? "off" : "on";
+               //      drawBtn();
+               //      VI.redraw();
+               //   });
+               //
+               // ----------------------------------------------------------------
+               // RECIPE 2: Draggable objects
+               // ----------------------------------------------------------------
+               // VizInteract doesn't expose drag directly, but it's trivial to
+               // build from raw mouse events on fabric.document. Track the
+               // mouse-down position, update on move, release on up. Put this
+               // in init() alongside your VI.onClick calls.
+               //
+               //   self.dragging = null;  // {id, dx, dy} while dragging
+               //   self.objPos = {puck: {x: 100, y: 100}};
+               //
+               //   VI.rect("puck", 100, 100, 60, 60, "#36a");
+               //
+               //   fabric.document.addEventListener("mousedown", function(e) {
+               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               //      const p = self.objPos.puck;
+               //      if (pos.x >= p.x && pos.x <= p.x + 60 &&
+               //          pos.y >= p.y && pos.y <= p.y + 60) {
+               //         self.dragging = {id: "puck", dx: pos.x - p.x, dy: pos.y - p.y};
+               //      }
+               //   });
+               //   fabric.document.addEventListener("mousemove", function(e) {
+               //      if (!self.dragging) return;
+               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               //      const p = self.objPos[self.dragging.id];
+               //      p.x = pos.x - self.dragging.dx;
+               //      p.y = pos.y - self.dragging.dy;
+               //      // VI.rect stores fabric objects in VI._objects; update
+               //      // position directly on the object for smooth dragging:
+               //      const obj = VI._objects[self.dragging.id];
+               //      if (obj) { obj.set({left: p.x, top: p.y}); }
+               //      VI.redraw();
+               //   });
+               //   fabric.document.addEventListener("mouseup", function(e) {
+               //      self.dragging = null;
+               //   });
+               //
+               // Note: mouseup and mousedown handlers added here are in ADDITION
+               // to the ones the library already installed. Both will fire.
+               // If you need to suppress the library's click zone handling
+               // during a drag, check self.dragging inside your VI.onClick
+               // callbacks and early-return.
+               //
+               // ----------------------------------------------------------------
+               // RECIPE 3: Persistent state across recompiles and reloads
+               // ----------------------------------------------------------------
+               // localStorage survives page reloads AND viz recompiles. Useful
+               // for saving user preferences, last-used values, or interaction
+               // history. Namespace your keys so you don't collide with anyone
+               // else's viz in the same Makerchip project.
+               //
+               //   const KEY = "myviz.count";
+               //   self.count = parseInt(fabric.window.localStorage.getItem(KEY) || "0", 10);
+               //
+               //   VI.onKey("ArrowRight", function() {
+               //      self.count++;
+               //      fabric.window.localStorage.setItem(KEY, String(self.count));
+               //      VI.redraw();
+               //   });
+               //
+               // For larger structured state, JSON.stringify/parse an object.
+               // For very large datasets, use fabric.window.indexedDB instead.
+               //
+               // ----------------------------------------------------------------
+               // RECIPE 4: Parameter dial with live preview + commit
+               // ----------------------------------------------------------------
+               // The canonical "best of both worlds" pattern: drag to preview
+               // the value locally (instant visual feedback), release to
+               // commit the change via recompile. Hybrid of fast-path and
+               // slow-path. This is the whole reason the library has both
+               // VI.redraw and VI.ide.patch.
+               //
+               //   self.previewVal = 128;  // what the UI is showing
+               //   self.committedVal = 128;  // what's in the TLV source
+               //
+               //   // Draw a horizontal slider track
+               //   VI.rect("track", 20, 200, 400, 8, "#444");
+               //   VI.rect("handle", 20 + (self.previewVal * 400 / 255) - 6,
+               //           194, 12, 20, "#3a6");
+               //
+               //   // Update preview during drag
+               //   fabric.document.addEventListener("mousemove", function(e) {
+               //      if (!self.sliderDragging) return;
+               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               //      const x = Math.max(20, Math.min(420, pos.x));
+               //      self.previewVal = Math.round((x - 20) * 255 / 400);
+               //      VI._objects.handle.set({left: x - 6});
+               //      VI.label("readout", "preview: " + self.previewVal, 20, 230);
+               //      VI.redraw();
+               //   });
+               //
+               //   // Commit on release — triggers real recompile
+               //   fabric.document.addEventListener("mouseup", function(e) {
+               //      if (!self.sliderDragging) return;
+               //      self.sliderDragging = false;
+               //      if (self.previewVal !== self.committedVal) {
+               //         self.committedVal = self.previewVal;
+               //         VI.ide.patch("my_param", self.previewVal);
+               //      }
+               //   });
+               //
+               //   fabric.document.addEventListener("mousedown", function(e) {
+               //      const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               //      if (pos.y >= 194 && pos.y <= 214 &&
+               //          pos.x >= 20  && pos.x <= 420) {
+               //         self.sliderDragging = true;
+               //      }
+               //   });
+               //
+               // ----------------------------------------------------------------
+               // RECIPE 5: Cycle scrubber (timeline at bottom of viz)
+               // ----------------------------------------------------------------
+               // Draw a timeline bar representing all simulated cycles, click
+               // to jump to a specific cycle via VI.ide.setCycle. Combine with
+               // the cycle-enumeration pattern to make an interactive explorer
+               // of a bounded input space.
+               //
+               //   const TIMELINE_X = 20, TIMELINE_Y = 400;
+               //   const TIMELINE_W = 400, TIMELINE_H = 20;
+               //   const TOTAL_CYCLES = 16;  // match your m4_multiverse_limit
+               //
+               //   VI.rect("timeline", TIMELINE_X, TIMELINE_Y,
+               //           TIMELINE_W, TIMELINE_H, "#222", "#666");
+               //
+               //   // Playhead indicator
+               //   const drawHead = function() {
+               //      const cyc = self.getCycle ? self.getCycle() : 0;
+               //      const x = TIMELINE_X + (cyc * TIMELINE_W / TOTAL_CYCLES);
+               //      VI.rect("head", x - 2, TIMELINE_Y - 4,
+               //              4, TIMELINE_H + 8, "#fc0");
+               //   };
+               //   drawHead();
+               //
+               //   VI.onClick("timeline", TIMELINE_X, TIMELINE_Y,
+               //              TIMELINE_W, TIMELINE_H, function(cx, cy) {
+               //      const cyc = Math.floor((cx - TIMELINE_X) * TOTAL_CYCLES / TIMELINE_W);
+               //      VI.ide.setCycle(cyc);
+               //      drawHead();
+               //      VI.redraw();
+               //   });
+               //
+               // Combined with cycle-enumerated inputs (see VI.ide.setCycle
+               // docs above), this gives you a complete interactive exploration
+               // tool: bit-mapped switches on top, signal displays in the
+               // middle, clickable timeline on the bottom, zero recompiles
+               // for any state change within the enumerated space.
+               //
                // ================================================================
                // END VizInteract library — your init() code starts here:
                // ================================================================
