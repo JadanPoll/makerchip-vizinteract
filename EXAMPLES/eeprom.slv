@@ -1,0 +1,526 @@
+\m5_TLV_version 1d: tl-x.org
+\m5
+   use(m5-1.0)
+\SV
+   m5_makerchip_module
+\TLV
+   // --- 1. The Single Pipeline ---
+   |eeprom
+      @1
+!        $reset = *reset;
+!        $test_phase[7:0] = *cyc_cnt[10:3];
+         $wr_en           = ($test_phase[3:0] == 4'd1);
+         $wr_addr[4:0]    = $test_phase[7:3];
+         $wr_data[7:0]    = ~{$test_phase[4:0], $test_phase[4:2]};
+         $wr_active       = >>1$wr_en;
+         $last_wr_addr[4:0] = $wr_en ? $wr_addr : >>1$last_wr_addr;
+         $last_wr_data[7:0] = $wr_en ? $wr_data : >>1$last_wr_data;
+
+      // --- 2. Memory Hierarchy ---
+      /mem[31:0]
+         @1
+            // /mem$index: the index of this replicated instance (SandPiper-supported)
+            $my_we = |eeprom$wr_en && (|eeprom$wr_addr == /mem$index);
+            $val[7:0] = |eeprom$reset ? 8'b0 :
+                        $my_we        ? |eeprom$wr_data :
+                        >>1$val;
+
+      @2
+         // Keep signals alive so SandPiper does not prune them.
+         // /mem[*]$val = concatenation of all 32 instances (32*8 = 256-bit wide).
+         `BOGUS_USE($wr_active $last_wr_addr $last_wr_data /mem[*]$val)
+
+!  *passed = *cyc_cnt > 800;
+   *failed = 1'b0;
+
+   // --- 3. Visual Debug ---
+   // \viz_js MUST be inside a /hier or |pipeline@stage scope.
+   // It cannot be bare in \TLV or directly inside |pipeline without a @stage.
+   // We use a /viz hierarchy wrapper at the \TLV level.
+   /viz
+      \viz_js
+         box: {width: 920, height: 760, fill: "#ffffff"},
+
+         init() {
+            // ================================================================
+            // VizInteract v2.0 — verified boilerplate
+            // ================================================================
+            const self = this;
+            const VI   = {};
+            this._VI   = VI;
+
+            VI._labels      = {};
+            VI._objects     = {};
+            VI._hotkeys     = {};
+            VI._clickZones  = [];
+            VI._hoverZones  = {};
+            VI._lastHovered = {};
+
+            // VI.redraw() — the correct way to repaint. Calls unrender+render+renderAll.
+            VI.redraw = function() {
+               if (self._viz && self._viz.pane) {
+                  const pane = self._viz.pane;
+                  if (typeof pane.unrender === "function") pane.unrender();
+                  if (typeof pane.render   === "function") pane.render();
+               }
+               self.getCanvas().renderAll();
+            };
+
+            // VI.clearAll() — wipe canvas and reset all tracking state.
+            // Always call at the top of render(). Re-register onClick/onHover after.
+            VI.clearAll = function() {
+               const c = self.getCanvas();
+               c.clear();
+               c.selection  = false;
+               VI._labels     = {};
+               VI._objects    = {};
+               VI._clickZones = [];
+               VI._hoverZones = {};
+            };
+
+            // VI.clearZones() — clear only hit zones (keep labels/rects intact).
+            VI.clearZones = function() {
+               VI._clickZones = [];
+               VI._hoverZones = {};
+            };
+
+            // Canvas focus management
+            const canvasEl    = fabric.document.querySelector("canvas");
+            const focusTarget = canvasEl ? canvasEl.closest("div") : null;
+            if (focusTarget) {
+               focusTarget.setAttribute("tabindex", "0");
+               setTimeout(function() { focusTarget.focus(); }, 500);
+            }
+
+            const _editorHasFocus = function() {
+               const active = fabric.document.activeElement;
+               const tag    = active ? active.tagName.toLowerCase() : "none";
+               return tag === "textarea" || tag === "input" ||
+                      (active && active.isContentEditable);
+            };
+
+            // Convert client mouse coordinates to canvas coordinates
+            VI.toCanvasCoords = function(clientX, clientY) {
+               if (!canvasEl) return {x: 0, y: 0};
+               const rect = canvasEl.getBoundingClientRect();
+               const c    = self.getCanvas();
+               const vpt  = c.viewportTransform || [1, 0, 0, 1, 0, 0];
+               return {
+                  x: Math.round((clientX - rect.left - vpt[4]) / vpt[0]),
+                  y: Math.round((clientY - rect.top  - vpt[5]) / vpt[3])
+               };
+            };
+
+            // VI.label(id, text, x, y, color, fontSize)
+            VI.label = function(id, text, x, y, color, fontSize) {
+               const c = self.getCanvas();
+               if (!VI._labels[id]) {
+                  const obj = new fabric.Text(String(text), {
+                     left: x, top: y,
+                     fontSize: fontSize || 16,
+                     fill: color || "#24292f",
+                     selectable: false, evented: false,
+                     hasControls: false, hasBorders: false,
+                     fontFamily: "monospace"
+                  });
+                  c.add(obj);
+                  VI._labels[id] = obj;
+               } else {
+                  VI._labels[id].set("text", String(text));
+                  VI._labels[id].set("left", x);
+                  VI._labels[id].set("top",  y);
+                  if (color)    VI._labels[id].set("fill",     color);
+                  if (fontSize) VI._labels[id].set("fontSize", fontSize);
+               }
+               return VI._labels[id];
+            };
+
+            // VI.rect(id, x, y, w, h, fill, stroke, strokeWidth, rx)
+            VI.rect = function(id, x, y, w, h, fill, stroke, sw, rx) {
+               sw = (sw === undefined) ? 1 : sw;
+               rx = (rx === undefined) ? 3 : rx;
+               const c = self.getCanvas();
+               if (!VI._objects[id]) {
+                  const obj = new fabric.Rect({
+                     left: x, top: y, width: w, height: h,
+                     fill:   fill   || "#f6f8fa",
+                     stroke: stroke || "#d0d7de",
+                     strokeWidth: sw, rx: rx, ry: rx,
+                     selectable: false, evented: false,
+                     hasControls: false, hasBorders: false
+                  });
+                  c.add(obj);
+                  VI._objects[id] = obj;
+               } else {
+                  VI._objects[id].set("left",        x);
+                  VI._objects[id].set("top",         y);
+                  VI._objects[id].set("width",       w);
+                  VI._objects[id].set("height",      h);
+                  VI._objects[id].set("fill",        fill   || VI._objects[id].fill);
+                  VI._objects[id].set("stroke",      stroke || VI._objects[id].stroke);
+                  VI._objects[id].set("strokeWidth", sw);
+               }
+               return VI._objects[id];
+            };
+
+            // VI.onClick(id, x, y, w, h, callback(canvasX, canvasY))
+            VI.onClick = function(id, x, y, w, h, callback) {
+               VI._clickZones = VI._clickZones.filter(function(z) { return z.id !== id; });
+               VI._clickZones.push({id: id, x: x, y: y, w: w, h: h, cb: callback});
+            };
+
+            // VI.onKey(key, callback)
+            VI.onKey = function(key, callback) { VI._hotkeys[key] = callback; };
+
+            // Hit test helper
+            const _hit = function(zone, cx, cy) {
+               return cx >= zone.x && cx <= zone.x + zone.w &&
+                      cy >= zone.y && cy <= zone.y + zone.h;
+            };
+
+            // Mouse and keyboard event listeners
+            fabric.document.addEventListener("mousedown", function(e) {
+               if (focusTarget) focusTarget.focus();
+            });
+            fabric.document.addEventListener("mouseup", function(e) {
+               if (_editorHasFocus()) return;
+               const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               // Pass canvas coordinates to each callback
+               VI._clickZones.forEach(function(zone) {
+                  if (_hit(zone, pos.x, pos.y)) zone.cb(pos.x, pos.y);
+               });
+            });
+            fabric.window.addEventListener("keydown", function(e) {
+               if (_editorHasFocus()) return;
+               if (VI._hotkeys[e.key]) VI._hotkeys[e.key](e);
+            });
+
+            // IDE bridge — enables VI.ide.patch() and VI.ide.recompile()
+            VI.ide = {available: false, _busy: false};
+            (function() {
+               var ide = null;
+               try {
+                  if (fabric.window && fabric.window.ide) ide = fabric.window.ide;
+                  else if (self._viz.pane.ide) ide = self._viz.pane.ide;
+               } catch(e) {}
+               if (ide && ide.IDEMethods &&
+                   typeof ide.IDEMethods.getCode     === "function" &&
+                   typeof ide.IDEMethods.loadProject === "function") {
+                  VI.ide.available = true;
+                  VI.ide._ide = ide;
+                  VI.ide._m   = ide.IDEMethods;
+               }
+            })();
+            VI.ide.getCode = function() {
+               if (!VI.ide.available) return null;
+               try { return VI.ide._m.getCode(); } catch(e) { return null; }
+            };
+            VI.ide.recompile = function(newCode) {
+               if (!VI.ide.available || VI.ide._busy) return false;
+               try {
+                  VI.ide._busy = true;
+                  VI.ide._m.loadProject(newCode);
+                  setTimeout(function() { VI.ide._busy = false; }, 3000);
+                  return true;
+               } catch(e) { VI.ide._busy = false; return false; }
+            };
+
+            // Camera controls
+            VI.camera = {
+               setScale:  function(n)    { self._viz.pane.content.contentScale = n; },
+               setFocus:  function(x, y) { self._viz.pane.content.userFocus = {x: x, y: y}; },
+               apply:     function()     { self._viz.pane.content.refreshContentPosition(); },
+               center:    function()     { self._viz.pane.content.centerContent(); }
+            };
+
+            // ================================================================
+            // END VizInteract v2.0 boilerplate
+            // ================================================================
+
+            // --- EEPROM UI State ---
+            // localStorage persists across recompiles within the same browser session.
+            var KEY = "makerchip.eeprom.overrides";
+            try {
+               self.localMem = JSON.parse(fabric.window.localStorage.getItem(KEY) || "{}");
+            } catch(e) {
+               self.localMem = {};
+            }
+            self.selAddr   = 0;
+            self.stagedVal = 0;
+
+            // Save override state to localStorage
+            self._saveOverrides = function() {
+               try {
+                  fabric.window.localStorage.setItem(KEY, JSON.stringify(self.localMem));
+               } catch(e) {}
+            };
+
+            // Keyboard shortcuts
+            VI.onKey("Escape", function() {
+               self.stagedVal = 0;
+               VI.redraw();
+            });
+            VI.onKey("Delete", function() {
+               delete self.localMem[self.selAddr];
+               self._saveOverrides();
+               VI.redraw();
+            });
+            VI.onKey("ArrowRight", function() {
+               self.selAddr = (self.selAddr + 1) % 32;
+               VI.redraw();
+            });
+            VI.onKey("ArrowLeft", function() {
+               self.selAddr = (self.selAddr + 31) % 32;
+               VI.redraw();
+            });
+
+            // Sync viz repaint to waveform scrubbing.
+            // Register in init() only — not render().
+            // Each recompile creates a new viz instance, so this re-registers each time.
+            (function() {
+               try {
+                  var viewer = self._viz.pane.ide.viewer;
+                  var orig   = viewer.onCycleUpdate;
+                  viewer.onCycleUpdate = function(cyc) {
+                     VI.redraw();
+                     if (orig) orig.apply(this, arguments);
+                  };
+               } catch(e) {}
+            })();
+         },
+
+         onTraceData() {
+            // New trace data arrived. Reset any derived/cached state.
+            // Canvas is NOT yet rendered here — do not touch Fabric objects.
+            this.selAddr   = 0;
+            this.stagedVal = 0;
+         },
+
+         render() {
+            // Always first: get VI and wipe canvas.
+            const VI = this._VI; if (!VI) return;
+            VI.clearAll();
+
+            const self    = this;
+            const pane    = this._viz.pane;
+            const wd      = pane.waveData;
+            const session = pane.session;
+
+            // --- COLORS ---
+            const BLUE  = "#0969da";
+            const GREEN = "#1a7f37";
+            const RED   = "#cf222e";
+            const PURP  = "#8250df";
+            const MUTED = "#57606a";
+            const DARK  = "#24292f";
+            const LGRAY = "#f6f8fa";
+
+            // --- Chip outline ---
+            VI.rect("chip", 20, 20, 590, 620, LGRAY, "#d0d7de", 2, 8);
+            VI.label("title", "EEPROM MEMORY (32 x 8-bit)", 40, 32, BLUE, 13);
+
+            // --- Read pipeline signals using VERIFIED native API ---
+            // Signal path format for TLV: "TLV|pipeline$signalname"
+            // Using wd.getSignalValueAtCycleByName() works from any context,
+            // unlike the sugar API ('$sig') which is render()-only and SandPiper-dependent.
+            var wrEn   = 0;
+            var wrAddr = 0;
+            var wrData = 0;
+            try { wrEn   = wd.getSignalValueAtCycleByName("TLV|eeprom$wr_en",   pane.cyc).asInt(0); } catch(e) {}
+            try { wrAddr = wd.getSignalValueAtCycleByName("TLV|eeprom$wr_addr", pane.cyc).asInt(0); } catch(e) {}
+            try { wrData = wd.getSignalValueAtCycleByName("TLV|eeprom$wr_data", pane.cyc).asInt(0); } catch(e) {}
+
+            // --- Memory cells (32 cells in a 8x4 grid) ---
+            for (var i = 0; i < 32; i++) {
+               // IIFE to capture i, cx, cy by value (closure safety)
+               (function(addr) {
+                  const cx = 40  + (addr % 8) * 66;
+                  const cy = 60  + Math.floor(addr / 8) * 66;
+
+                  // Read simulation value using VERIFIED native API.
+                  // Signal path: "TLV|eeprom/mem[N]$val"
+                  var simVal = 0;
+                  try {
+                     simVal = wd.getSignalValueAtCycleByName(
+                        "TLV|eeprom/mem[" + addr + "]$val", pane.cyc
+                     ).asInt(0);
+                  } catch(e) {}
+
+                  // Apply local override if set (persisted via localStorage)
+                  var isOvr = (self.localMem[addr] !== undefined);
+                  var val   = isOvr ? self.localMem[addr] : simVal;
+
+                  // Highlight if this is the current write target
+                  var isWritten = (wrEn && wrAddr === addr);
+                  var isSel     = (self.selAddr === addr);
+
+                  // Cell background
+                  var cellFill   = isSel     ? "#ddf4ff" :
+                                   isWritten ? "#fff8c5" :
+                                               "#ffffff";
+                  var cellStroke = isSel     ? BLUE :
+                                   isOvr     ? PURP :
+                                   isWritten ? "#d4a72c" :
+                                               "#d0d7de";
+                  var cellSW     = (isSel || isWritten) ? 2 : 1;
+
+                  VI.rect("cell" + addr, cx, cy, 62, 58, cellFill, cellStroke, cellSW, 4);
+
+                  // Address label (top-left of cell)
+                  VI.label("addr" + addr,
+                     addr.toString(16).toUpperCase().padStart(2, "0"),
+                     cx + 4, cy + 4, MUTED, 9);
+
+                  // Value label (center of cell)
+                  VI.label("val" + addr,
+                     val.toString(16).toUpperCase().padStart(2, "0"),
+                     cx + 31, cy + 26,
+                     isOvr ? PURP : DARK,
+                     17);
+
+                  // Click handler — selects cell and highlights in schematic/NavTLV
+                  VI.onClick("cell" + addr, cx, cy, 62, 58, function() {
+                     self.selAddr = addr;
+                     // Cross-pane highlight: schematic, waveform, NavTLV simultaneously
+                     try {
+                        pane.highlightLogicalElement("|eeprom/mem[" + addr + "]$val");
+                     } catch(e) {}
+                     VI.redraw();
+                  });
+               })(i);
+            }
+
+            // --- Write indicator arrow ---
+            if (wrEn) {
+               var arrowRow  = Math.floor(wrAddr / 8);
+               var arrowCol  = wrAddr % 8;
+               var arrowX    = 40 + arrowCol * 66 + 31;
+               var arrowY    = 60 + arrowRow * 66 - 12;
+               VI.rect("wr_arrow", arrowX - 3, arrowY, 6, 10, RED, "transparent", 0, 0);
+               VI.label("wr_label", "WR", arrowX - 8, arrowY - 14, RED, 9);
+            }
+
+            // --- Timeline scrubber ---
+            var START = wd.startCycle;
+            var END   = wd.endCycle;
+            var TX = 40, TY = 650, TW = 565, TH = 22;
+            VI.rect("scrub_bg", TX, TY, TW, TH, "#f1f2f4", "#d0d7de", 1, 4);
+
+            // Cycle readout label
+            VI.label("cyc_label", "CYC: " + pane.cyc, TX, TY - 18, MUTED, 11);
+            VI.label("end_label", String(END), TX + TW - 5, TY - 18, MUTED, 11);
+
+            // Playhead
+            var headX = TX + (pane.cyc - START) * TW / Math.max(1, END - START);
+            VI.rect("scrub_head", headX - 3, TY - 4, 6, TH + 8, RED, "transparent", 0, 2);
+
+            // Click to seek — callback receives canvas X coordinate
+            VI.onClick("scrub_bg", TX, TY, TW, TH, function(cx) {
+               var targetCyc = Math.round(START + (cx - TX) * (END - START) / TW);
+               targetCyc = Math.max(START, Math.min(END, targetCyc));
+               // session.setCycle() is GLOBAL — moves all panes
+               try { session.setCycle(targetCyc); } catch(e) {}
+               VI.redraw();
+            });
+
+            // --- Inspector side panel ---
+            var PX = 640, PY = 20;
+            VI.rect("panel", PX, PY, 260, 680, LGRAY, "#d0d7de", 1, 6);
+            VI.label("p_title",  "CELL INSPECTOR",
+               PX + 12, PY + 12, BLUE, 12);
+
+            // Selected cell info
+            var selSimVal = 0;
+            try {
+               selSimVal = wd.getSignalValueAtCycleByName(
+                  "TLV|eeprom/mem[" + self.selAddr + "]$val", pane.cyc
+               ).asInt(0);
+            } catch(e) {}
+            var selIsOvr = (self.localMem[self.selAddr] !== undefined);
+            var selVal   = selIsOvr ? self.localMem[self.selAddr] : selSimVal;
+
+            VI.label("p_addr",
+               "ADDR:    0x" + self.selAddr.toString(16).toUpperCase().padStart(2, "0"),
+               PX + 12, PY + 40, DARK, 13);
+            VI.label("p_val",
+               "SIM VAL: 0x" + selSimVal.toString(16).toUpperCase().padStart(2, "0") +
+               "  (" + selSimVal + ")",
+               PX + 12, PY + 62, selIsOvr ? MUTED : PURP, 13);
+            if (selIsOvr) {
+               VI.label("p_ovr",
+                  "OVERRIDE:0x" + selVal.toString(16).toUpperCase().padStart(2, "0"),
+                  PX + 12, PY + 84, PURP, 13);
+            }
+
+            VI.label("p_sep1", "────────────────────────", PX + 12, PY + 108, "#d0d7de", 11);
+
+            VI.label("p_wren",
+               "WR_EN:   " + (wrEn ? "1  <-- ACTIVE" : "0"),
+               PX + 12, PY + 125, wrEn ? GREEN : MUTED, 13);
+            VI.label("p_wraddr",
+               "WR_ADDR: 0x" + wrAddr.toString(16).toUpperCase().padStart(2, "0") +
+               " (" + wrAddr + ")",
+               PX + 12, PY + 147, DARK, 13);
+            VI.label("p_wrdata",
+               "WR_DATA: 0x" + wrData.toString(16).toUpperCase().padStart(2, "0") +
+               " (" + wrData + ")",
+               PX + 12, PY + 169, DARK, 13);
+
+            VI.label("p_sep2", "────────────────────────", PX + 12, PY + 193, "#d0d7de", 11);
+
+            // --- Staged value display ---
+            VI.label("p_stage_label", "STAGE VALUE (hex keypad):", PX + 12, PY + 210, MUTED, 11);
+            VI.label("p_staged",
+               "0x" + self.stagedVal.toString(16).toUpperCase().padStart(2, "0") +
+               " (" + self.stagedVal + ")",
+               PX + 12, PY + 228, RED, 16);
+
+            // --- Hex keypad (4x4 grid of 0-F) ---
+            var HEX_KEYS = ["0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F"];
+            for (var k = 0; k < 16; k++) {
+               (function(key, idx) {
+                  var kx = PX + 12 + (idx % 4) * 58;
+                  var ky = PY + 260 + Math.floor(idx / 4) * 52;
+                  VI.rect("k" + key, kx, ky, 50, 44, "#ffffff", "#d0d7de", 1, 4);
+                  VI.label("kl" + key, key, kx + 25, ky + 14, DARK, 15);
+                  VI.onClick("k" + key, kx, ky, 50, 44, function() {
+                     self.stagedVal = ((self.stagedVal << 4) | parseInt(key, 16)) & 0xFF;
+                     VI.redraw();
+                  });
+               })(HEX_KEYS[k], k);
+            }
+
+            // --- Action buttons ---
+            // "WRITE" — commit stagedVal as a local override for selAddr
+            VI.rect("btn_write", PX + 12, PY + 480, 110, 38, "#1a7f37", "#137333", 1, 4);
+            VI.label("btn_write_lbl", "WRITE", PX + 55, PY + 494, "#ffffff", 13);
+            VI.onClick("btn_write", PX + 12, PY + 480, 110, 38, function() {
+               self.localMem[self.selAddr] = self.stagedVal;
+               self._saveOverrides();
+               self.stagedVal = 0;
+               VI.redraw();
+            });
+
+            // "CLEAR OVR" — remove local override for selAddr, restore sim value
+            VI.rect("btn_clear", PX + 140, PY + 480, 110, 38, "#cf222e", "#a40e26", 1, 4);
+            VI.label("btn_clear_lbl", "CLEAR OVR", PX + 183, PY + 494, "#ffffff", 13);
+            VI.onClick("btn_clear", PX + 140, PY + 480, 110, 38, function() {
+               delete self.localMem[self.selAddr];
+               self._saveOverrides();
+               VI.redraw();
+            });
+
+            // "CLEAR ALL" — remove all local overrides
+            VI.rect("btn_clearall", PX + 12, PY + 530, 238, 38, "#6e7781", "#57606a", 1, 4);
+            VI.label("btn_clearall_lbl", "CLEAR ALL OVERRIDES", PX + 103, PY + 544, "#ffffff", 12);
+            VI.onClick("btn_clearall", PX + 12, PY + 530, 238, 38, function() {
+               self.localMem = {};
+               self._saveOverrides();
+               VI.redraw();
+            });
+
+            // --- Keyboard hint ---
+            VI.label("hint1", "Keys: Arrows=navigate  Del=clear  Esc=reset stage", PX + 12, PY + 582, MUTED, 10);
+         }
+\SV
+   endmodule
