@@ -1,6 +1,8 @@
 # TL-Verilog / M5 / TL-X / Visual Debug — Hypercomprehensive LLM Cheatsheet
 
-> **Purpose:** This document is the complete reference for an LLM to write correct code using M5, TL-X (TL-Verilog), and the Visual Debug (VIZ) framework. Every syntax rule, macro, behavior, gotcha, and edge case documented in the official specifications is captured here. Do not guess; use this document.
+> **Purpose:** This document is the complete reference for an LLM to write correct code using M5, TL-X (TL-Verilog), and the Visual Debug (VIZ) framework. Every syntax rule, macro, behavior, gotcha, and edge case documented in the official specifications is captured here, plus empirical corrections from working code. Do not guess; use this document.
+>
+> **Version note:** Sections marked ⚠️ **EMPIRICAL CORRECTION** contain findings from tested working code that override or clarify the written specification.
 
 ---
 
@@ -254,14 +256,28 @@ fn(my_fn, First, ..., {
 
 #### 1.6.1 Comments
 
-| Syntax | Behavior |
-|--------|---------|
-| `/// comment text` | Line comment — stripped entirely (including preceding whitespace) |
-| `/** comment **/` | Block comment — stripped; newlines preserved |
+| Syntax | Behavior | Where valid |
+|--------|---------|------------|
+| `/// comment text` | Line comment — stripped entirely (including preceding whitespace) | Source files generally |
+| `/** comment **/` | Block comment — stripped; newlines preserved | Source files generally |
+| `/ comment text` | Statement comment — stripped (single slash) | Inside code blocks and `\m5` regions |
+
+⚠️ **EMPIRICAL CORRECTION — `\m5` region comments:**
+Inside `\m5` regions, the **single slash `/`** is the practical comment syntax, not `///`. The single slash is the "statement comment" form from code-block syntax and is what working TL-Verilog files actually use:
+```
+\m5
+   / This is a comment inside an \m5 region
+   use(m5-1.0)
+   / Another comment
+   var(MyConst, 8)
+```
+`///` is documented for general source files but in practice `/` is the form used in `\m5` regions.
+
+**`//` target-language comments between regions:** `//` comments placed between `\m5`, `\SV`, and `\TLV` region boundaries (not inside an active `\m5` block) pass through harmlessly and work fine as human-readable comments. The restriction on `//` only matters when trying to disable actual M5 code — for that, use `/` or `///`.
 
 - Comments are stripped **before** indentation checking and quote/parenthesis matching.
 - To include `///` or `/**` in output: `['//']['/']`
-- Target-language comments (e.g. `//` in Verilog) are **not** M5 comments. To disable M5 code, use M5 comments.
+- Target-language comments (e.g. `//` in Verilog) are **not** M5 comments. To disable M5 code inside an `\m5` region, use `/`.
 
 #### 1.6.2 Macro Call Sugar
 
@@ -896,8 +912,8 @@ First character of every line in `\TLV` / `\SV_plus` regions:
 
 | Syntax | Meaning |
 |--------|---------|
-| `>>2` | Ahead reference (2 stages ahead) |
-| `<<2` | Behind reference (2 stages behind) |
+| `>>2` | Behind reference (2 stages in the past — previous transactions) |
+| `<<2` | Ahead reference (2 stages in the future) |
 | `<>0` | Natural/zero alignment |
 | `$RETAIN` | Use previous cycle's value of assigned signal |
 
@@ -1046,11 +1062,18 @@ $sig
 - Assigned signals must have empty path.
 
 **Alignment rules:**
-- `<<N`: N stages behind the assignment's stage.
-- `>>N`: N stages ahead.
+- `<<N`: N stages **ahead** of the assignment's stage (future transactions).
+- `>>N`: N stages **behind** the assignment's stage (past transactions — the previous N cycles).
 - `<>0`: natural/zero alignment.
 - Within a pipeline: natural alignment assumed if none specified.
 - Cross-pipeline: explicit alignment required.
+
+⚠️ **EMPIRICAL CORRECTION — `>>` and `<<` direction is counterintuitive:**
+`>>N` means **behind** (past/previous transactions), NOT ahead. `<<N` means **ahead** (future). This is the opposite of what the shift-operator reading suggests. Confirmed by working Fibonacci example:
+```
+$val[31:0] = ($reset || ! $run) ? 1 : >>1$val + >>2$val;
+```
+Here `>>1$val` = value from 1 cycle ago, `>>2$val` = value from 2 cycles ago. This is the correct idiom for accessing previous pipeline stage values.
 
 **`$RETAIN`:** References the assigned signal delayed by one cycle.
 
@@ -1093,6 +1116,21 @@ $sig
 - Define macros for use later; produce no content in resulting TL-Verilog.
 - After elaboration, only whitespace/comments should remain.
 
+⚠️ **EMPIRICAL CORRECTION — Multiple `\m5` regions are valid:**
+A single file may contain multiple separate `\m5` blocks. They are all processed and their definitions accumulate. This is commonly used to separate a large header comment block from the actual `use(...)` and definition calls:
+
+```
+\m5
+   / Large header comment block...
+   / ...spanning many lines
+\m5
+   use(m5-1.0)
+   var(MyConst, 8)
+```
+
+⚠️ **EMPIRICAL CORRECTION — Comments inside `\m5` use `/` (single slash):**
+Use single-slash `/` for line comments inside `\m5` regions. This is the statement comment form from code-block syntax. See §1.6.1.
+
 ### 3.3 Within-line Macros
 
 - Defined in `\m5` regions or anywhere.
@@ -1111,6 +1149,31 @@ $sig
 - **Convention:** first word character of a parameter name is `_` (since TL-Verilog identifiers cannot begin with `_`).
 - Body is captured as literal string; calls substitute parameter names for arguments then elaborate.
 - Matching strings cannot be preceded or postceded by a character that could be part of the name; `['']` creates delimitation.
+
+⚠️ **EMPIRICAL CORRECTION — `\TLV` dual role: declaration vs. logic region:**
+`\TLV` serves two completely different purposes depending on whether a name follows on the same line:
+
+| Form | Meaning |
+|------|---------|
+| `\TLV` (alone on line) | Enters a TL-X **logic region** — contains pipelines, stages, assignments |
+| `\TLV name(params)` (name on same line) | Declares a **named TLV macro block** — captures body as a reusable macro |
+
+Macro declarations live at the **top level of the file**, unindented, interleaved between other regions. They are NOT inside a logic `\TLV` region. Example:
+
+```
+\m5
+   use(m5-1.0)
+\TLV fib()
+   $val[31:0] = ($reset || ! $run) ? 1 : >>1$val + >>2$val;
+\SV
+   m5_makerchip_module
+\TLV
+   m5+fib()
+   *passed = *cyc_cnt == 20 && $val == 32'h452f;
+\SV
+   endmodule
+```
+Here `\TLV fib()` is the declaration; `\TLV` alone later is the logic region where `m5+fib()` is called.
 
 **Symbol prefix conventions:**
 
@@ -1132,6 +1195,21 @@ m5+<n>(<args>)
 - May appear anywhere in a `\TLV` region where a TL-Verilog statement could appear.
 - Expansion is indented based on calling context.
 - Wrapped in `\source` / `\end_source` unless `--fmtNoSource`.
+
+⚠️ **EMPIRICAL CORRECTION — `m5+` calls in bare `\TLV` regions (no enclosing pipeline/stage) are valid:**
+When a macro itself defines its own pipeline and stage context internally, it can be called from a `\TLV` logic region with no enclosing `|pipe` or `@stage`. The macro body provides all the necessary TL-X structure. Example:
+
+```
+\TLV fib()
+   $val[31:0] = ($reset || ! $run) ? 1 : >>1$val + >>2$val;
+
+\TLV
+   $reset = *reset;
+   $run = 1'b1;
+   m5+fib()              ← called with no |pipe or @stage wrapper
+   *passed = *cyc_cnt == 20 && $val == 32'h452f;
+```
+The signals produced inside `fib()` are accessible in the caller's scope by name.
 
 **Multi-line calls (3-space continuation indent):**
 ```
@@ -1175,7 +1253,43 @@ m5_TLV_fn(name, [params,] body)
 - Called with `m5+` notation.
 - Avoids `\source` / `\end_source` overhead.
 
-### 3.8 Library Inclusion
+### 3.9 Makerchip Testbench Pattern
+
+⚠️ **EMPIRICAL — Standard Makerchip testbench structure:**
+
+```
+\m5_TLV_version 1d: tl-x.org
+\SV
+   // Optional: license block
+\m5
+   / Comments use single-slash inside \m5
+   use(m5-1.0)
+// TLV macro library definitions go here, at top level:
+\TLV my_macro(params)
+   // macro body
+\SV
+   m5_makerchip_module   // expands to full module port declaration for Makerchip
+\TLV
+   // Stimulus
+   $reset = *reset;
+   $my_input = 1'b1;
+   // Instantiate DUT
+   m5+my_macro(args)
+   // Checking
+   *passed = *cyc_cnt == 20 && $output == expected_val;
+   *failed = *cyc_cnt > 40;
+\SV
+   endmodule
+```
+
+**Key Makerchip-specific signals:**
+- `*reset` — HDL reset signal driven by Makerchip simulation harness
+- `*cyc_cnt` — HDL cycle counter driven by Makerchip
+- `*passed` — assign `1'b1` when test passes; halts simulation
+- `*failed` — assign `1'b1` when test fails; halts simulation with failure
+- These `*` signals are HDL signals and lines assigning them do NOT require `!` (impure) marker in Makerchip context
+
+**`m5_makerchip_module`:** Expands to the complete Verilog module declaration with all standard Makerchip ports (clk, reset, cyc_cnt, passed, failed, etc.). Required in `\SV` region before the `\TLV` logic region.
 
 **Verilog/SystemVerilog by URL:**
 ```
@@ -1563,7 +1677,7 @@ Instantiation:
 
 12. **`m4_` prefix:** Do not use directly. Do not elaborate `m4_` in strings.
 
-13. **Target-language comments:** `//` in Verilog is NOT an M5 comment. Use `///` to disable M5 code.
+13. ⚠️ **Comment syntax depends on context:** Inside `\m5` regions, use `/` (single slash) for line comments. `///` works in general source files. `//` (target-language comment) is NOT stripped by M5 and should not be used inside `\m5` regions to disable code — use `/` for that. Between regions (in the file but not inside an active `\m5` block), `//` passes through harmlessly.
 
 14. **`m5_lazy_fn` limitations:** Does not support `^` (inherited) parameters.
 
@@ -1575,7 +1689,7 @@ Instantiation:
 
 1. **Tabs in TL-X regions:** Forbidden. Use spaces only (3 per indent level).
 
-2. **HDL signal reference (`*sig`):** Line MUST be marked `!` (impure). Cannot be safely retimed.
+2. **HDL signal reference (`*sig`):** Line MUST be marked `!` (impure). Cannot be safely retimed. Exception: Makerchip special signals (`*passed`, `*failed`, `*reset`, `*cyc_cnt`) do not require `!` in testbench context.
 
 3. **Signal type:** Default is single bit. Specify `[N:M]` for vectors.
 
@@ -1592,6 +1706,16 @@ Instantiation:
 9. **Scope reentrance:** A scope can be entered, exited, and re-entered by design.
 
 10. **Pipeline scopes cannot be replicated:** No range expression on `|my_pipe`.
+
+11. ⚠️ **`>>N` is BEHIND (past), `<<N` is AHEAD (future):** This is counterintuitive. `>>1$val` = previous cycle's value of `$val`. `>>2$val` = two cycles ago. The Fibonacci example confirms: `$val = ... : >>1$val + >>2$val` correctly references the two most recent previous values.
+
+12. ⚠️ **`\TLV name()` ≠ `\TLV` logic region:** `\TLV` followed by a name on the same line declares a reusable macro block. `\TLV` alone enters a logic region. These are two completely different constructs sharing the same keyword.
+
+13. ⚠️ **Multiple `\m5` regions are valid:** A file may have any number of `\m5` blocks; definitions from all of them accumulate.
+
+14. ⚠️ **`m5+` calls in bare `\TLV` (no pipeline/stage) are valid** when the macro provides its own internal pipeline context or when signals flow into the caller's context without requiring scope wrappers at the call site.
+
+15. **Do NOT use `m5_loop` inside `\TLV` logic regions for multi-line output:** `m5_loop` expands to multiple lines; within-line macros must produce no carriage returns. Use behavioral hierarchy (`/name[N:0]`) for replicated logic, or put loop-based code generation in `\m5` regions / `m5_TLV_fn`.
 
 ### VIZ Gotchas
 
@@ -1633,22 +1757,31 @@ IF:        ~if(cond, [true], [false])    LOOP: ~for(Var, ['a, b, c, '], [body])
 CALC:      calc(a + b * c)              STRING LEN: length(str)
 SUBSTR:    substr(str, from, len)        JOIN: join([', '], a, b, c)
 ERROR:     error(['msg'])               DEBUG: DEBUG(['msg'])
-COMMENT:   /// line   OR   /** block **/
+COMMENT:   / line (in \m5 region)  OR  /// line  OR  /** block **/
 OUTPUT:    ~(text)   OR   ~Var   OR   ~macro_call(…)
 QUOTE:     ['literal text with, commas']
 NO-EVAL:   m5_\foo  (suppress sugar on m5_foo)
 WORD-BOUND: \m5_foo  (force word boundary before m5_foo)
 ```
 
-### TL-Verilog Structure Template
+### TL-Verilog Structure Template (Empirically Verified)
 
 ```
 \m5_TLV_version 1d: tl-x.org
-\m5
-   use(m5-0.1)
-   var(MyConst, 8)
 \SV
-module top(input clk, input reset, …);
+   // License or other comments here (// is fine between regions)
+\m5
+   / Single-slash comments inside \m5 regions  ← idiomatic
+   use(m5-1.0)
+\m5
+   / Multiple \m5 blocks are valid
+   var(MyConst, 8)
+// Named \TLV macro declarations at TOP LEVEL (not inside a logic \TLV region):
+\TLV my_macro($param1, #const)
+   $param1 = #const;
+\SV
+   m5_makerchip_module    // Makerchip: expands to full module ports
+// \TLV alone (no name) = logic region:
 \TLV
    |my_pipe
       /my_hier[3:0]
@@ -1657,9 +1790,33 @@ module top(input clk, input reset, …);
          ?$valid
             @2
 !              $data[7:0] = *input_port;
-               $result = $data + m5_MyConst;
+               $result[7:0] = >>1$result + m5_MyConst; // >>1 = 1 cycle ago
+   m5+my_macro($foo[7:0], m5_MyConst)  // m5+ call; no pipeline wrapper needed
+   *passed = *cyc_cnt > 20;
+   *failed = 1'b0;
 \SV
-endmodule
+   endmodule
+```
+
+### Fibonacci Example (Confirmed Working in Makerchip)
+
+```
+\m5_TLV_version 1d: tl-x.org
+\SV
+\m5
+   use(m5-1.0)
+\TLV fib()
+   $val[31:0] = ($reset || ! $run) ? 1 : >>1$val + >>2$val;
+\SV
+   m5_makerchip_module
+\TLV
+   $reset = *reset;
+   $run = 1'b1;
+   m5+fib()
+   *passed = *cyc_cnt == 20 && $val == 32'h452f;
+   *failed = *cyc_cnt > 40;
+\SV
+   endmodule
 ```
 
 ### VIZ Block Template
@@ -1682,4 +1839,4 @@ endmodule
 
 ---
 
-*Sources: M5 Text Processing Language User's Guide (v1.0, 2023); TL-Verilog Macro-Preprocessor User Guide (Draft, 2022); TL-X 1d HDL Extension Syntax Specification; Visual Debug User Guide (Draft, 2022). All by Redwood EDA, LLC.*
+*Sources: M5 Text Processing Language User's Guide (v1.0, 2023); TL-Verilog Macro-Preprocessor User Guide (Draft, 2022); TL-X 1d HDL Extension Syntax Specification; Visual Debug User Guide (Draft, 2022). All by Redwood EDA, LLC. Empirical corrections from verified working Makerchip code, 2026.*
