@@ -1,3 +1,4 @@
+Credits: https://github.com/stevehoover
 # VizInteract
 
 A paste-once library that adds mouse, keyboard, hover, and click-zone support to TL-Verilog `\viz_js` blocks in Makerchip, plus a documented reference for reaching the Makerchip IDE internals from inside a viz (for triggering recompiles from viz code).
