@@ -1,0 +1,451 @@
+\m5_TLV_version 1d: tl-x.org
+\m5
+   use(m5-1.0)
+\SV
+   m5_makerchip_module
+\TLV
+   // --- 1. The Single Pipeline ---
+   |eeprom
+      @1
+!        $reset = *reset;
+!        $test_phase[7:0] = *cyc_cnt[10:3];
+         $wr_en           = ($test_phase[3:0] == 4'd1);
+         $wr_addr[4:0]    = $test_phase[7:3];
+         $wr_data[7:0]    = ~{$test_phase[4:0], $test_phase[4:2]};
+         $wr_active       = >>1$wr_en;
+         $last_wr_addr[4:0] = $wr_en ? $wr_addr : >>1$last_wr_addr;
+         $last_wr_data[7:0] = $wr_en ? $wr_data : >>1$last_wr_data;
+
+      // --- 2. Memory Hierarchy ---
+      /mem[31:0]
+         @1
+            $my_we = |eeprom$wr_en && (|eeprom$wr_addr == /mem$index);
+            $val[7:0] = |eeprom$reset ? 8'b0 :
+                        $my_we        ? |eeprom$wr_data :
+                        >>1$val;
+
+      @2
+         `BOGUS_USE($wr_active $last_wr_addr $last_wr_data /mem[*]$val)
+
+!  *passed = *cyc_cnt > 800;
+   *failed = 1'b0;
+
+   // --- 3. Visual Debug: Physical Chip & Logic Analyzer ---
+   /viz
+      \viz_js
+         box: {width: 960, height: 760, fill: "#111111"},
+
+         init() {
+            // ================================================================
+            // START VizInteract v2.0
+            // ================================================================
+            const self = this;
+            const VI   = {};
+            this._VI   = VI;
+
+            VI._labels      = {};
+            VI._objects     = {};
+            VI._hotkeys     = {};
+            VI._clickZones  = [];
+            VI._hoverZones  = {};
+
+            VI.redraw = function() {
+               if (self._viz && self._viz.pane) {
+                  const pane = self._viz.pane;
+                  if (typeof pane.unrender === "function") pane.unrender();
+                  if (typeof pane.render   === "function") pane.render();
+               }
+               self.getCanvas().renderAll();
+            };
+
+            VI.clearAll = function() {
+               const c = self.getCanvas();
+               c.clear();
+               c.selection  = false;
+               VI._labels     = {};
+               VI._objects    = {};
+               VI._clickZones = [];
+               VI._hoverZones = {};
+            };
+
+            const canvasEl    = fabric.document.querySelector("canvas");
+            const focusTarget = canvasEl ? canvasEl.closest("div") : null;
+            if (focusTarget) {
+               focusTarget.setAttribute("tabindex", "0");
+               setTimeout(function() { focusTarget.focus(); }, 500);
+            }
+
+            const _editorHasFocus = function() {
+               const active = fabric.document.activeElement;
+               const tag    = active ? active.tagName.toLowerCase() : "none";
+               return tag === "textarea" || tag === "input" || (active && active.isContentEditable);
+            };
+
+            VI.toCanvasCoords = function(clientX, clientY) {
+               if (!canvasEl) return {x: 0, y: 0};
+               const rect = canvasEl.getBoundingClientRect();
+               const c    = self.getCanvas();
+               const vpt  = c.viewportTransform || [1, 0, 0, 1, 0, 0];
+               return {
+                  x: Math.round((clientX - rect.left - vpt[4]) / vpt[0]),
+                  y: Math.round((clientY - rect.top  - vpt[5]) / vpt[3])
+               };
+            };
+
+            VI.label = function(id, text, x, y, color, fontSize, fontFam) {
+               const c = self.getCanvas();
+               if (!VI._labels[id]) {
+                  const obj = new fabric.Text(String(text), {
+                     left: x, top: y,
+                     fontSize: fontSize || 16,
+                     fill: color || "#fff",
+                     selectable: false, evented: false,
+                     hasControls: false, hasBorders: false,
+                     fontFamily: fontFam || "monospace"
+                  });
+                  c.add(obj);
+                  VI._labels[id] = obj;
+               } else {
+                  VI._labels[id].set("text", String(text));
+                  VI._labels[id].set("left", x);
+                  VI._labels[id].set("top",  y);
+                  if (color)    VI._labels[id].set("fill",      color);
+                  if (fontSize) VI._labels[id].set("fontSize", fontSize);
+               }
+               return VI._labels[id];
+            };
+
+            VI.rect = function(id, x, y, w, h, fill, stroke, sw, rx) {
+               sw = (sw === undefined) ? 0 : sw;
+               rx = (rx === undefined) ? 0 : rx;
+               const c = self.getCanvas();
+               if (!VI._objects[id]) {
+                  const obj = new fabric.Rect({
+                     left: x, top: y, width: w, height: h,
+                     fill:  fill  || "#444",
+                     stroke: stroke || "transparent",
+                     strokeWidth: sw, rx: rx, ry: rx,
+                     selectable: false, evented: false,
+                     hasControls: false, hasBorders: false
+                  });
+                  c.add(obj);
+                  VI._objects[id] = obj;
+               } else {
+                  VI._objects[id].set("left",        x);
+                  VI._objects[id].set("top",         y);
+                  VI._objects[id].set("width",       w);
+                  VI._objects[id].set("height",      h);
+                  VI._objects[id].set("fill",        fill   || VI._objects[id].fill);
+                  VI._objects[id].set("stroke",      stroke || VI._objects[id].stroke);
+                  VI._objects[id].set("strokeWidth", sw);
+               }
+               return VI._objects[id];
+            };
+
+            VI.onClick = function(id, x, y, w, h, callback) {
+               VI._clickZones.push({id: id, x: x, y: y, w: w, h: h, cb: callback});
+            };
+
+            VI.onKey = function(key, callback) { VI._hotkeys[key] = callback; };
+
+            const _hit = function(zone, cx, cy) {
+               return cx >= zone.x && cx <= zone.x + zone.w &&
+                      cy >= zone.y && cy <= zone.y + zone.h;
+            };
+
+            fabric.document.addEventListener("mousedown", function(e) {
+               if (focusTarget) focusTarget.focus();
+            });
+            fabric.document.addEventListener("mouseup", function(e) {
+               if (_editorHasFocus()) return;
+               const pos = VI.toCanvasCoords(e.clientX, e.clientY);
+               VI._clickZones.forEach(function(zone) {
+                  if (_hit(zone, pos.x, pos.y)) zone.cb(pos.x, pos.y);
+               });
+            });
+            fabric.window.addEventListener("keydown", function(e) {
+               if (_editorHasFocus()) return;
+               if (VI._hotkeys[e.key]) VI._hotkeys[e.key](e);
+            });
+            // ================================================================
+            // END VizInteract v2.0
+            // ================================================================
+
+            // State Initialization
+            var KEY = "makerchip.eeprom.overrides";
+            try { self.localMem = JSON.parse(fabric.window.localStorage.getItem(KEY) || "{}"); } 
+            catch(e) { self.localMem = {}; }
+            self.selAddr   = 0;
+            self.stagedVal = 0;
+
+            self._saveOverrides = function() {
+               try { fabric.window.localStorage.setItem(KEY, JSON.stringify(self.localMem)); } catch(e) {}
+            };
+
+            // Hotkeys
+            VI.onKey("Escape", function() { self.stagedVal = 0; VI.redraw(); });
+            VI.onKey("Delete", function() { delete self.localMem[self.selAddr]; self._saveOverrides(); VI.redraw(); });
+            VI.onKey("ArrowRight", function() { self.selAddr = (self.selAddr + 1) % 32; VI.redraw(); });
+            VI.onKey("ArrowLeft", function() { self.selAddr = (self.selAddr + 31) % 32; VI.redraw(); });
+
+            // Sync to waveform updates
+            (function() {
+               try {
+                  var viewer = self._viz.pane.ide.viewer;
+                  var orig   = viewer.onCycleUpdate;
+                  viewer.onCycleUpdate = function(cyc) {
+                     VI.redraw();
+                     if (orig) orig.apply(this, arguments);
+                  };
+               } catch(e) {}
+            })();
+         },
+
+         onTraceData() {
+            this.selAddr   = 0;
+            this.stagedVal = 0;
+         },
+
+         render() {
+            const VI = this._VI; if (!VI) return;
+            VI.clearAll();
+
+            const self    = this;
+            const pane    = this._viz.pane;
+            const wd      = pane.waveData;
+            const session = pane.session;
+
+            if (!wd) return;
+
+            // --- THEME COLORS ---
+            const C_BG    = "#111111";
+            const C_CHIP  = "#1a1a1a";
+            const C_PIN   = "#b5a642"; // Antique gold
+            const C_DIE   = "#22252a"; // Silicon die color
+            const C_PHOS  = "#33ff33"; // Phosphor green
+            const C_PH_DK = "#0d330d"; // Dark phosphor
+            const C_LA_BG = "#050a05"; // Logic Analyzer screen
+            const C_SILV  = "#cccccc";
+
+            // Helper for hex formatting
+            const hex2 = (v) => v.toString(16).toUpperCase().padStart(2, "0");
+
+            // --- 1. PHYSICAL CHIP (DIP-28) ---
+            const CHIP_X = 60, CHIP_Y = 40, CHIP_W = 280, CHIP_H = 580;
+            
+            // Pins (14 per side)
+            for(let i=0; i<14; i++) {
+               let py = CHIP_Y + 20 + i*40;
+               // Left pins
+               VI.rect("pinL_"+i, CHIP_X - 15, py, 20, 15, C_PIN, "#887010", 1, 2);
+               // Right pins
+               VI.rect("pinR_"+i, CHIP_X + CHIP_W - 5, py, 20, 15, C_PIN, "#887010", 1, 2);
+            }
+            
+            // IC Body
+            VI.rect("chip_body", CHIP_X, CHIP_Y, CHIP_W, CHIP_H, C_CHIP, "#333", 2, 8);
+            // Pin 1 Indicator Notch
+            VI.rect("chip_notch", CHIP_X + CHIP_W/2 - 20, CHIP_Y, 40, 15, C_BG, "#333", 1, 10);
+            
+            // Silk screen text
+            VI.label("silk_1", "ZERO-LABS", CHIP_X + 18, CHIP_Y + 30, "#444", 18, "sans-serif");
+            VI.label("silk_2", "EEPROM-32x8", CHIP_X + 140, CHIP_Y + 30, "#444", 18, "sans-serif");
+
+            // Die Cavity (Window into the chip)
+            const DIE_X = CHIP_X + 30, DIE_Y = CHIP_Y + 60, DIE_W = CHIP_W - 60, DIE_H = CHIP_H - 100;
+            VI.rect("die_cavity", DIE_X, DIE_Y, DIE_W, DIE_H, C_DIE, "#111", 4, 0);
+
+            // Fetch current cycle bus values
+            let getSig = (name, cyc) => {
+               try { return wd.getSignalValueAtCycleByName(name, cyc).asInt(0); } catch(e) { return 0; }
+            };
+            let wrEn   = getSig("TLV|eeprom$wr_en", pane.cyc);
+            let wrAddr = getSig("TLV|eeprom$wr_addr", pane.cyc);
+
+            // Memory Array (4 columns x 8 rows inside the die)
+            for (let i = 0; i < 32; i++) {
+               (function(addr) {
+                  let col = addr % 4;
+                  let row = Math.floor(addr / 4);
+                  let cx = DIE_X + 10 + col * 50;
+                  let cy = DIE_Y + 15 + row * 58;
+
+                  let simVal = getSig("TLV|eeprom/mem[" + addr + "]$val", pane.cyc);
+                  let isOvr  = (self.localMem[addr] !== undefined);
+                  let val    = isOvr ? self.localMem[addr] : simVal;
+
+                  let isSel = (self.selAddr === addr);
+                  let isWr  = (wrEn && wrAddr === addr);
+
+                  let fill   = isSel ? "#3a4a5a" : (isWr ? "#5a4a2a" : "#1a1c20");
+                  let stroke = isSel ? "#4fc3f7" : (isOvr ? "#b39ddb" : (isWr ? "#ffd54f" : "#333"));
+                  
+                  VI.rect("cell_"+addr, cx, cy, 45, 48, fill, stroke, isSel||isWr?2:1, 2);
+                  VI.label("ca_"+addr, hex2(addr), cx+3, cy+3, "#666", 9);
+                  VI.label("cv_"+addr, hex2(val),  cx+12, cy+20, isOvr ? "#b39ddb" : "#ccc", 14);
+
+                  VI.onClick("cell_"+addr, cx, cy, 45, 48, function() {
+                     self.selAddr = addr;
+                     try { pane.highlightLogicalElement("|eeprom/mem[" + addr + "]$val"); } catch(e) {}
+                     VI.redraw();
+                  });
+               })(i);
+            }
+
+
+            // --- 2. LOGIC ANALYZER SCREEN ---
+            const LA_X = 400, LA_Y = 40, LA_W = 520, LA_H = 340;
+            VI.rect("la_bezel", LA_X, LA_Y, LA_W, LA_H, "#222", "#444", 2, 6);
+            VI.rect("la_screen", LA_X + 10, LA_Y + 30, LA_W - 20, LA_H - 40, C_LA_BG, C_PHOS, 1, 2);
+            VI.label("la_brand", "LOGIC ANALYZER :: TRIGGER AUTO", LA_X + 15, LA_Y + 10, "#888", 11, "sans-serif");
+
+            // Draw probes connecting Chip to Logic Analyzer
+            // Pin 9, 11, 13 on the right side
+            let probeY_we = CHIP_Y + 20 + 8*40 + 7;
+            let probeY_wa = CHIP_Y + 20 + 10*40 + 7;
+            let probeY_wd = CHIP_Y + 20 + 12*40 + 7;
+            
+            VI.rect("probe1", CHIP_X + CHIP_W, probeY_we, LA_X - (CHIP_X + CHIP_W), 2, "#4fc3f7");
+            VI.rect("probe2", CHIP_X + CHIP_W, probeY_wa, LA_X - (CHIP_X + CHIP_W), 2, "#ffd54f");
+            VI.rect("probe3", CHIP_X + CHIP_W, probeY_wd, LA_X - (CHIP_X + CHIP_W), 2, "#81c784");
+
+            // Logic Analyzer Waveform Plotter
+            const PLOT_X = LA_X + 70;
+            const PLOT_W = LA_W - 90;
+            const CYCLES_TO_SHOW = 16;
+            const stepX = PLOT_W / CYCLES_TO_SHOW;
+            const startCyc = Math.max(wd.startCycle, pane.cyc - 12);
+
+            // Grid
+            for(let g=0; g<=CYCLES_TO_SHOW; g++) {
+               VI.rect("la_grid_"+g, PLOT_X + g*stepX, LA_Y + 30, 1, LA_H - 40, C_PH_DK);
+            }
+
+            // Labels
+            VI.label("lbl_we", "WR_EN", LA_X + 15, LA_Y + 65, C_PHOS, 12);
+            VI.label("lbl_wa", "WR_ADDR", LA_X + 15, LA_Y + 145, C_PHOS, 12);
+            VI.label("lbl_wd", "WR_DATA", LA_X + 15, LA_Y + 225, C_PHOS, 12);
+
+            // Draw sliding window traces
+            for (let k = 0; k < CYCLES_TO_SHOW; k++) {
+               let c = startCyc + k;
+               let prev_c = c - 1;
+
+               let we = getSig("TLV|eeprom$wr_en", c);
+               let p_we = getSig("TLV|eeprom$wr_en", prev_c);
+               let wa = getSig("TLV|eeprom$wr_addr", c);
+               let p_wa = getSig("TLV|eeprom$wr_addr", prev_c);
+               let wd_d = getSig("TLV|eeprom$wr_data", c);
+               let p_wd = getSig("TLV|eeprom$wr_data", prev_c);
+
+               let x0 = PLOT_X + k*stepX;
+               let w  = stepX;
+
+               // Trace 1: WR_EN (1-bit digital)
+               let yWE_hi = LA_Y + 50, yWE_lo = LA_Y + 80;
+               let yWE = we ? yWE_hi : yWE_lo;
+               VI.rect("tr_we_h_"+k, x0, yWE, w, 2, C_PHOS);
+               if (we !== p_we && k > 0) VI.rect("tr_we_v_"+k, x0, yWE_hi, 2, 32, C_PHOS);
+
+               // Trace 2: WR_ADDR (Bus)
+               let yWA = LA_Y + 130;
+               let wa_fill = we ? "#194d19" : C_LA_BG;
+               if (wa !== p_wa && k > 0) {
+                  VI.rect("tr_wa_gap_"+k, x0-1, yWA, 2, 24, C_LA_BG);
+                  VI.rect("tr_wa_v_"+k, x0, yWA, 1, 24, C_PHOS);
+               }
+               VI.rect("tr_wa_b_"+k, x0+1, yWA, w-2, 24, wa_fill, C_PHOS, 1);
+               if (k === 0 || wa !== p_wa || k % 4 === 0) {
+                  VI.label("tr_wal_"+k, hex2(wa), x0 + 4, yWA + 4, C_PHOS, 12);
+               }
+
+               // Trace 3: WR_DATA (Bus)
+               let yWD = LA_Y + 210;
+               let wd_fill = we ? "#194d19" : C_LA_BG;
+               if (wd_d !== p_wd && k > 0) {
+                  VI.rect("tr_wd_gap_"+k, x0-1, yWD, 2, 24, C_LA_BG);
+                  VI.rect("tr_wd_v_"+k, x0, yWD, 1, 24, C_PHOS);
+               }
+               VI.rect("tr_wd_b_"+k, x0+1, yWD, w-2, 24, wd_fill, C_PHOS, 1);
+               if (k === 0 || wd_d !== p_wd || k % 4 === 0) {
+                  VI.label("tr_wdl_"+k, hex2(wd_d), x0 + 4, yWD + 4, C_PHOS, 12);
+               }
+
+               // Analyzer Cursor for Current Simulation Cycle
+               if (c === pane.cyc) {
+                  VI.rect("la_cursor", x0 + w/2, LA_Y + 30, 2, LA_H - 40, "yellow");
+                  VI.rect("la_cur_bg", x0 + w/2 - 15, LA_Y + 280, 32, 14, "yellow");
+                  VI.label("la_cur_lbl", "C"+c, x0 + w/2 - 12, LA_Y + 280, "#000", 10);
+               }
+            }
+
+
+            // --- 3. CONTROL PANEL & KEYPAD ---
+            const CP_X = 400, CP_Y = 390, CP_W = 520, CP_H = 230;
+            VI.rect("cp_bg", CP_X, CP_Y, CP_W, CP_H, "#1e1e1e", "#333", 2, 4);
+            
+            // Selected Cell Info
+            let selSim = getSig("TLV|eeprom/mem[" + self.selAddr + "]$val", pane.cyc);
+            let selIsOvr = (self.localMem[self.selAddr] !== undefined);
+            
+            VI.label("cp_t1", "CELL INSPECTOR", CP_X + 20, CP_Y + 15, C_SILV, 14, "sans-serif");
+            VI.label("cp_addr", "ADDRESS:   0x" + hex2(self.selAddr), CP_X + 20, CP_Y + 45, "#4fc3f7", 14);
+            VI.label("cp_val",  "SIM VALUE: 0x" + hex2(selSim), CP_X + 20, CP_Y + 65, selIsOvr?"#666":"#ccc", 14);
+            
+            if (selIsOvr) {
+               VI.label("cp_ovr", "OVERRIDE:  0x" + hex2(self.localMem[self.selAddr]), CP_X + 20, CP_Y + 85, "#b39ddb", 14);
+            }
+
+            VI.label("cp_stage", "STAGE VAL: 0x" + hex2(self.stagedVal), CP_X + 20, CP_Y + 115, "#ffd54f", 16);
+
+            // Action Buttons
+            VI.rect("btn_wr", CP_X + 20, CP_Y + 150, 90, 30, "#194d19", "#3f3", 1, 4);
+            VI.label("btn_wr_l", "WRITE", CP_X + 43, CP_Y + 157, C_PHOS, 12);
+            VI.onClick("btn_wr", CP_X + 20, CP_Y + 150, 90, 30, function() {
+               self.localMem[self.selAddr] = self.stagedVal;
+               self._saveOverrides(); self.stagedVal = 0; VI.redraw();
+            });
+
+            VI.rect("btn_clr", CP_X + 120, CP_Y + 150, 90, 30, "#4d1919", "#f33", 1, 4);
+            VI.label("btn_clr_l", "CLEAR", CP_X + 145, CP_Y + 157, "#f33", 12);
+            VI.onClick("btn_clr", CP_X + 120, CP_Y + 150, 90, 30, function() {
+               delete self.localMem[self.selAddr];
+               self._saveOverrides(); VI.redraw();
+            });
+
+            // Hex Keypad (Right side of Control Panel)
+            const KP_X = CP_X + 260, KP_Y = CP_Y + 20;
+            const HEX_KEYS = ["0","1","2","3","4","5","6","7","8","9","A","B","C","D","E","F"];
+            for (let k = 0; k < 16; k++) {
+               (function(key, idx) {
+                  let kx = KP_X + (idx % 4) * 55;
+                  let ky = KP_Y + Math.floor(idx / 4) * 45;
+                  VI.rect("k" + key, kx, ky, 45, 35, "#333", "#555", 1, 4);
+                  VI.label("kl" + key, key, kx + 18, ky + 10, C_SILV, 14);
+                  VI.onClick("k" + key, kx, ky, 45, 35, function() {
+                     self.stagedVal = ((self.stagedVal << 4) | parseInt(key, 16)) & 0xFF;
+                     VI.redraw();
+                  });
+               })(HEX_KEYS[k], k);
+            }
+
+            // --- 4. TIMELINE SCRUBBER ---
+            const TX = 60, TY = 660, TW = 860, TH = 25;
+            let START = wd.startCycle, END = wd.endCycle;
+            
+            VI.rect("scrb_bg", TX, TY, TW, TH, "#222", "#444", 1, 4);
+            VI.label("cyc_lbl", "CYCLE: " + pane.cyc, TX, TY - 20, C_SILV, 12);
+            VI.label("end_lbl", "END: " + END, TX + TW - 60, TY - 20, C_SILV, 12);
+
+            let headX = TX + (pane.cyc - START) * TW / Math.max(1, END - START);
+            VI.rect("scrb_hd", headX - 3, TY - 5, 6, TH + 10, "#ffd54f", "transparent", 0, 2);
+
+            VI.onClick("scrb_bg", TX, TY, TW, TH, function(cx) {
+               let targetCyc = Math.round(START + (cx - TX) * (END - START) / TW);
+               targetCyc = Math.max(START, Math.min(END, targetCyc));
+               try { session.setCycle(targetCyc); } catch(e) {}
+               VI.redraw();
+            });
+         }
+\SV
+   endmodule
