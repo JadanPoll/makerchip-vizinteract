@@ -34,7 +34,7 @@
 26. [Future Investigation — Remaining Unknowns](#26-future-investigation--remaining-unknowns)
 
 ---
-
+IMPORTANT: NO SINGLE QUOTES IN VIZ_JS
 ## 1. VizInteract v2.0 — Full Boilerplate
 
 Paste the entire `init()` library block at the top of your `init()`. Add the two-line boilerplate at the top of `render()`. Optionally define `onTraceData()`.
