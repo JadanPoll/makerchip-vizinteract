@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yosys + NetlistSVG Multi-Stage Visualizer</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #d4d4d4; padding: 20px; margin: 0; }
+        h2, h3 { color: #569cd6; margin-top: 0; }
+        button { padding: 12px 24px; font-size: 1.1rem; background: #569cd6; color: #1e1e1e; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #9cdcfe; }
+        .panel { background: #2d2d2d; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        #console-log { height: 250px; overflow-y: auto; color: #9cdcfe; white-space: pre-wrap; font-family: monospace; font-size: 0.9rem; border: 1px solid #444; background: #111; padding: 10px;}
+        .schematic-container { display: flex; gap: 20px; flex-wrap: wrap; }
+        .schematic-box { flex: 1; min-width: 400px; background: #ffffff; padding: 15px; border-radius: 8px; text-align: center; overflow: auto; min-height: 400px; color: #000; border: 2px solid #569cd6; }
+        .schematic-box svg { max-width: 100%; height: auto; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <h2>Yosys + NetlistSVG Multi-Stage Visualizer</h2>
+    <p>Compare Pre-Synthesis RTL with Post-Synthesis Gate-Level Logic (100% In-Browser).</p>
+    <button id="runBtn">▶ Run Synthesis Pipeline</button>
+
+    <div class="panel" style="margin-top: 20px;">
+        <h3>Live Console &amp; Yosys Log</h3>
+        <div id="console-log">Ready...</div>
+    </div>
+
+    <div id="visuals" class="schematic-container hidden">
+        <div class="schematic-box">
+            <h3>1. RTL (Pre-Synthesis)</h3>
+            <p style="font-size: 0.8rem; color: #666;">High-level functional blocks (Muxes, Adders)</p>
+            <div id="rtlSchematic"></div>
+        </div>
+        <div class="schematic-box">
+            <h3>2. Gate-Level (Post-Synthesis)</h3>
+            <p style="font-size: 0.8rem; color: #666;">Mapped to basic hardware logic gates</p>
+            <div id="synthSchematic"></div>
+        </div>
+    </div>
+<script type="module">
+    import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+
+    const logEl = document.getElementById('console-log');
+    function appendLog(msg) {
+        logEl.textContent += msg;
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const origLog = console.log;
+    console.log = function(...args) {
+        appendLog("[LOG] " + args.join(' ') + '\n');
+        origLog.apply(console, args);
+    };
+
+    const verilogCode = `
+module simple_mux (
+    input sel,
+    input d0,
+    input d1,
+    output reg y
+);
+    always @(*) begin
+        if (sel == 1'b0) y = d0;
+        else y = d1;
+    end
+endmodule`;
+
+    async function loadExternalScript(src) {
+        return new Promise((resolve, reject) => {
+            const script = document.createElement('script');
+            script.src = src;
+            script.type = 'text/javascript';
+            script.crossOrigin = "anonymous";
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error(`Failed to load ${src}`));
+            document.head.appendChild(script);
+        });
+    }
+
+    // ←←← NEW: Fix modern Yosys JSON for NetlistSVG ←←←
+    function fixYosysJson(json) {
+        if (!json.modules) return json;
+        for (let modName in json.modules) {
+            const mod = json.modules[modName];
+            if (mod.attributes) {
+                for (let attr in mod.attributes) {
+                    const val = mod.attributes[attr];
+                    // Convert binary string attributes (e.g. "000...001") back to numbers
+                    if (typeof val === 'string' && /^[01]+$/.test(val)) {
+                        mod.attributes[attr] = parseInt(val, 2);  // becomes 1 (or 0)
+                    }
+                }
+            }
+        }
+        return json;
+    }
+
+    async function doSynthesis() {
+        logEl.textContent = "";
+        document.getElementById('visuals').classList.add('hidden');
+
+        const decoder = new TextDecoder();
+        try {
+            console.log("Loading ELK and NetlistSVG via jsDelivr...");
+            await loadExternalScript('https://cdn.jsdelivr.net/npm/elkjs/lib/elk.bundled.js');
+            await loadExternalScript('https://cdn.jsdelivr.net/npm/netlistsvg/built/netlistsvg.bundle.js');
+
+            if (typeof netlistsvg === 'undefined' || typeof ELK === 'undefined') {
+                throw new Error("Render engines failed to initialize.");
+            }
+
+            const yosysScript = 'read_verilog input.v; prep -top simple_mux; write_json rtl.json; synth -top simple_mux; write_json synth.json;';
+
+            console.log("Executing Yosys Synthesis Pipeline...");
+            const filesOut = await runYosys(
+                ['-p', yosysScript],
+                { 'input.v': verilogCode },
+                {
+                    stdout: b => { if (b) appendLog(decoder.decode(b)); },
+                    stderr: b => { if (b) appendLog(decoder.decode(b)); }
+                }
+            );
+
+            const getJson = (name) => {
+                const data = filesOut[name];
+                let json = JSON.parse(typeof data === 'string' ? data : decoder.decode(data));
+                return fixYosysJson(json);   // ←←← Apply the fix here
+            };
+
+            console.log("Rendering Vivado-style SVGs...");
+            const skin = netlistsvg.digitalSkin;
+
+            // Render RTL Stage
+            netlistsvg.render(skin, getJson('rtl.json'), (err, svg) => {
+                if (err) throw err;
+                document.getElementById('rtlSchematic').innerHTML = svg;
+            });
+
+            // Render Synth Stage
+            netlistsvg.render(skin, getJson('synth.json'), (err, svg) => {
+                if (err) throw err;
+                document.getElementById('synthSchematic').innerHTML = svg;
+            });
+
+            document.getElementById('visuals').classList.remove('hidden');
+            console.log("🎉 Pipeline Complete! (Yosys JSON compatibility fixed)");
+
+        } catch (err) {
+            console.log("\n[ERROR]: " + err.message);
+            console.error(err);
+        }
+    }
+
+    document.getElementById('runBtn').addEventListener('click', doSynthesis);
+</script>
+</body>
+</html>
