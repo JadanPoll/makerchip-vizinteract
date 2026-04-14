@@ -116,6 +116,7 @@ endmodule</textarea>
     </div>
 <script type="module">
     import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+    import { WASI, File, OpenFile, ConsoleStdout } from 'https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.3.0/dist/index.js';
     
     const logEl = document.getElementById('console-log');
     const cppEl = document.getElementById('cppPreview');
@@ -181,6 +182,7 @@ endmodule</textarea>
 
     // ─────────────────────────────────────────────────────────────────────
     // BARE-METAL CXXRTL HEADER (Zero Dependencies, Zero Linker Errors)
+    // Now with bit-masking to handle correct hardware overflow!
     // ─────────────────────────────────────────────────────────────────────
     const BARE_METAL_CXXRTL_H = `#ifndef CXXRTL_H
 #define CXXRTL_H
@@ -315,6 +317,10 @@ namespace cxxrtl_yosys {
             uint32_t b_val = (i < value<B>::chunks) ? b.data[i] : 0;
             uint64_t sum = (uint64_t)a_val + b_val + carry;
             r.data[i] = sum; carry = sum >> 32;
+        }
+        // Correct masking to emulate hardware overflow behaviour
+        if constexpr (Y % 32 != 0) {
+            r.data[value<Y>::chunks - 1] &= (1u << (Y % 32)) - 1;
         }
         return r;
     }
@@ -506,25 +512,10 @@ extern "C" {
             
             document.getElementById('simPanel').classList.remove('hidden');
             
-            document.getElementById('initBtn').onclick = () => {
-                wasmInstance.init();
-                stepCounter = 0;
-                updateLiveDisplay();
-                log('Simulator initialized', 'log-ok');
-            };
-            document.getElementById('tickBtn').onclick = () => {
-                wasmInstance.tick();
-                stepCounter++;
-                updateLiveDisplay();
-            };
-            document.getElementById('rstBtn').onclick = () => {
-                wasmInstance.set_rst_n(0);
-                setTimeout(() => { wasmInstance.set_rst_n(1); updateLiveDisplay(); }, 50);
-            };
-            
             const enChk = document.getElementById('enChk');
             const loadEnChk = document.getElementById('loadEnChk');
             const loadData = document.getElementById('loadData');
+            
             const updateInputs = () => {
                 if(!wasmInstance) return;
                 wasmInstance.set_en(enChk.checked ? 1 : 0);
@@ -543,6 +534,29 @@ extern "C" {
                 rEl.style.background = rollover ? '#f97171' : '#69db7c';
                 document.getElementById('stepCount').textContent = `steps: ${stepCounter}`;
             }
+
+            document.getElementById('initBtn').onclick = () => {
+                wasmInstance.init();
+                wasmInstance.set_rst_n(1); // LIFT RESET!
+                updateInputs();            // SYNC UI!
+                stepCounter = 0;
+                updateLiveDisplay();
+                log('Simulator initialized', 'log-ok');
+            };
+            document.getElementById('tickBtn').onclick = () => {
+                wasmInstance.tick();
+                stepCounter++;
+                updateLiveDisplay();
+            };
+            document.getElementById('rstBtn').onclick = () => {
+                wasmInstance.set_rst_n(0);
+                setTimeout(() => { wasmInstance.set_rst_n(1); updateLiveDisplay(); }, 50);
+            };
+            
+            // CRITICAL: Initialize the Wasm state correctly on load!
+            wasmInstance.init();
+            wasmInstance.set_rst_n(1);
+            updateInputs();
             updateLiveDisplay();
             
             const dlBtn = document.createElement('button');
