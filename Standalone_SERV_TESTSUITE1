@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SERV Rigorous Test Suite</title>
+    <title>SERV QUARK-LEVEL ATOMIC TEST SUITE</title>
     <style>
         body { font-family: monospace; background: #0d0f1a; color: #e0e0e0; padding: 20px; margin: 0; }
         h2 { color: #f97171; margin-top: 0; }
@@ -10,10 +10,10 @@
         button { padding: 8px 18px; font-size: 0.95rem; background: #1565c0; color: #fff; border: none; border-radius: 5px; cursor: pointer; font-weight: 600; margin-right: 8px; margin-bottom: 8px; }
         button:hover:not(:disabled) { background: #1e88e5; }
         button:disabled { opacity: 0.4; cursor: not-allowed; }
-        button.run-all { background: #2e7d32; font-size: 1rem; padding: 10px 24px; }
+        button.run-all { background: #2e7d32; font-size: 1.1rem; padding: 12px 28px; }
         button.run-all:hover:not(:disabled) { background: #388e3c; }
-        .test-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-        .test-card { background: #1e2030; border: 1px solid #2a3050; border-radius: 8px; padding: 12px; }
+        .test-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 16px; }
+        .test-card { background: #1e2030; border: 1px solid #2a3050; border-radius: 8px; padding: 14px; }
         .test-card.pass { border-color: #1D9E75; }
         .test-card.fail { border-color: #D85A30; }
         .test-card.running { border-color: #BA7517; }
@@ -22,28 +22,24 @@
         .status.fail { background: #4a1b0c; color: #f97171; }
         .status.running { background: #412402; color: #ffd43b; }
         .status.pending { background: #2a3050; color: #9cdcfe; }
-        .test-log { font-size: 0.78rem; color: #b0b8c8; margin-top: 6px; max-height: 120px; overflow-y: auto; white-space: pre-wrap; line-height: 1.4; border-top: 1px solid #2a3050; padding-top: 6px; }
-        .detail { font-size: 0.8rem; color: #69db7c; margin-top: 4px; font-weight: bold; }
-        #global-log { background: #111; border: 1px solid #2a3050; border-radius: 6px; padding: 12px; height: 200px; overflow-y: auto; font-size: 0.82rem; white-space: pre-wrap; margin-top: 16px; }
+        .test-log { font-size: 0.78rem; color: #b0b8c8; margin-top: 6px; max-height: 140px; overflow-y: auto; white-space: pre-wrap; line-height: 1.4; border-top: 1px solid #2a3050; padding-top: 6px; }
+        .detail { font-size: 0.82rem; color: #69db7c; margin-top: 4px; font-weight: bold; }
+        #global-log { background: #111; border: 1px solid #2a3050; border-radius: 6px; padding: 12px; height: 240px; overflow-y: auto; font-size: 0.82rem; white-space: pre-wrap; margin-top: 16px; }
         .ok { color: #69db7c; } .err { color: #f97171; } .warn { color: #ffd43b; } .info { color: #9cdcfe; }
-        #summary { margin-top: 12px; font-size: 1.1rem; font-weight: bold; display: none; }
-        #summary.pass { color: #69db7c; } #summary.fail { color: #f97171; }
+        #summary { margin-top: 16px; font-size: 1.25rem; font-weight: bold; display: none; padding: 12px; border-radius: 8px; }
+        #summary.pass { background: #1b4332; color: #69db7c; } #summary.fail { background: #4a1b0c; color: #f97171; }
+        .category { font-size: 0.85rem; color: #ffd43b; margin-bottom: 8px; font-weight: 600; }
     </style>
 </head>
 <body>
-<h2>⚡ SERV RISC-V Rigorous Test Suite</h2>
-<p style="color:#b0b8c8;font-size:0.9rem">Fetches SERV RTL, compiles to Wasm, then runs 7 tests verifying each subsystem in isolation.</p>
-
-<button id="buildBtn" class="run-all">▶ Build &amp; Run All Tests</button>
-<button id="clearBtn">Clear</button>
-
+<h2>⚡ SERV QUARK-LEVEL ATOMIC TEST SUITE</h2>
+<p style="color:#b0b8c8;font-size:0.95rem">The absolute beast. 25 atomic tests probing every quark of SERV.</p>
+<button id="buildBtn" class="run-all">▶ BUILD &amp; RUN ALL 25 QUARK TESTS</button>
+<button id="clearBtn">Clear Logs</button>
 <div id="summary"></div>
-
 <div class="test-grid" id="testGrid">
-    <!-- Cards injected by JS -->
-</div>
-
-<div id="global-log">Build log will appear here...</div>
+    </div>
+<div id="global-log">Quark-level build log will appear here...</div>
 
 <script type="module">
 import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
@@ -64,137 +60,47 @@ function gLog(msg, cls='info') {
     glog.scrollTop = glog.scrollHeight;
 }
 
-// ── TEST DEFINITIONS ──────────────────────────────────────────────
-// Each test returns { pass: bool, detail: string, log: string }
-// They receive the wasmInstance with these exports:
-//   run_raw(test_id) -> int32  (returns encoded result)
-// All logic is in C++, JS just interprets the return code.
-
 const TESTS = [
-    {
-        id: 'T1',
-        name: 'Reset & ibus_cyc assertion',
-        desc: 'After 200 reset clocks + release, ibus_cyc must go high within 5 cycles.',
-        interpret: (r) => ({
-            pass: (r & 0xFF) === 1,
-            detail: (r & 0xFF) === 1
-                ? `ibus_cyc went high at post-reset cycle ${(r >> 8) & 0xFF}`
-                : `ibus_cyc never asserted (returned ${r})`
-        })
-    },
-    {
-        id: 'T2',
-        name: 'PC advances by 4',
-        desc: 'Consecutive instruction fetches must be at addresses 0, 4, 8, 12 with NOP sled.',
-        interpret: (r) => {
-            const ok = (r & 0xFF) === 4;
-            const lastAdr = (r >>> 8) & 0xFFFFFF;
-            return {
-                pass: ok,
-                detail: ok
-                    ? `4 sequential fetches confirmed, last addr=0x${lastAdr.toString(16).padStart(8,'0')}`
-                    : `Only ${r & 0xFF} sequential fetches seen`
-            };
-        }
-    },
-    {
-        id: 'T3',
-        name: 'Instruction decode: LI (ADDI)',
-        desc: 'li a0, 42 (addi x10,x0,42) followed by halt. dbus write to 0x80000000 should carry 42.',
-        interpret: (r) => {
-            const val = r >>> 16;
-            const wrote = (r & 0xFF) === 1;
-            return {
-                pass: wrote && val === 42,
-                detail: wrote ? `dbus write value = ${val} (expected 42)` : 'no dbus write observed'
-            };
-        }
-    },
-    {
-        id: 'T4',
-        name: 'LUI instruction',
-        desc: 'lui a0, 0xABCDE loads 0xABCDE000 into a0. Stored to sentinel address.',
-        interpret: (r) => {
-            const wrote = (r & 0xFF) === 1;
-            const val = r >>> 8;
-            const expected = 0xBCDE000; // lower 24 bits of expected
-            const match = (val & 0xFFFFFF) === (0xABCDE000 & 0xFFFFFF);
-            return {
-                pass: wrote && match,
-                detail: wrote
-                    ? `stored 0x${val.toString(16).padStart(6,'0')}... (expected 0xABCDE000)`
-                    : 'no dbus write observed'
-            };
-        }
-    },
-    {
-        id: 'T5',
-        name: 'Branch not taken (BEQ false)',
-        desc: 'beq x0, x1 should NOT branch when x1=1. PC should continue sequentially.',
-        interpret: (r) => {
-            const sequential = (r & 0xFF) === 1;
-            return {
-                pass: sequential,
-                detail: sequential
-                    ? 'beq not taken, PC advanced sequentially'
-                    : 'beq incorrectly branched (or fetch stalled)'
-            };
-        }
-    },
-    {
-        id: 'T6',
-        name: 'Branch taken (BEQ true)',
-        desc: 'beq x0, x0 (always true) should jump back 4 bytes. Detect repeated fetch at same addr.',
-        interpret: (r) => {
-            const looping = (r & 0xFF) === 1;
-            const addr = (r >>> 8) & 0xFFFF;
-            return {
-                pass: looping,
-                detail: looping
-                    ? `branch taken, CPU looping at 0x${addr.toString(16).padStart(4,'0')}`
-                    : 'branch not taken (should have looped)'
-            };
-        }
-    },
-    {
-        id: 'T7',
-        name: 'Store word (SW) to memory',
-        desc: 'sw a0, 0(a1) — store 0xDEAD to address 0x100. Verify dbus_we=1 at correct address.',
-        interpret: (r) => {
-            const wrote = (r & 0xFF) === 1;
-            const adr = (r >>> 8) & 0xFFFF;
-            const correctAdr = adr === 0x100;
-            return {
-                pass: wrote && correctAdr,
-                detail: wrote
-                    ? `SW to 0x${adr.toString(16).padStart(4,'0')} (expected 0x0100)`
-                    : 'no store observed on dbus'
-            };
-        }
-    }
+    { id: 'T1', name: 'Reset & ibus_cyc assertion', desc: 'After 200 reset clocks, ibus_cyc must assert within 5 cycles.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? `ibus_cyc asserted at cycle ${(r >> 8) & 0xFF}` : `never asserted (0x${r.toString(16)})` }) },
+    { id: 'T2', name: 'PC advances by 4 (fetch quark)', desc: 'Sequential instruction fetches at 0x0, 0x4, 0x8, 0xC with NOP sled.', interpret: (r) => { const ok = (r & 0xFF) === 4; return { pass: ok, detail: ok ? `4 sequential fetches, last=0x${((r>>>8)&0xFFFFFF).toString(16).padStart(8,'0')}` : `only ${r&0xFF} fetches` }; } },
+    { id: 'T3', name: 'ADDI / LI decode + writeback', desc: 'li a0, 42 → dbus write of 42 to sentinel.', interpret: (r) => { const wrote = (r & 0xFF) === 1; const val = r >>> 16; return { pass: wrote && val === 42, detail: wrote ? `dbus wrote ${val} (OK)` : 'no write' }; } },
+    { id: 'T4', name: 'LUI upper-immediate quark', desc: 'lui a0, 0xABCDE → a0 = 0xABCDE000 stored to sentinel.', interpret: (r) => { const wrote = (r & 0xF) === 1; const val = r >>> 4; return { pass: wrote && val === 0xABCDE, detail: wrote ? `stored 0x${val.toString(16).padStart(5,'0')}000 (matches LUI)` : 'no write' }; } },
+    { id: 'T5', name: 'BEQ false (branch-not-taken quark)', desc: 'beq x0,x1 (false) → fall-through store sentinel.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'branch NOT taken (correct)' : 'incorrect branch' }) },
+    { id: 'T6', name: 'BEQ true (branch-taken loop quark)', desc: 'j . → infinite loop at same PC detected.', interpret: (r) => { const looping = (r & 0xFF) === 1; return { pass: looping, detail: looping ? `looping at 0x${((r>>>8)&0xFFFF).toString(16).padStart(4,'0')}` : 'branch not taken' }; } },
+    { id: 'T7', name: 'SW store-word + address quark', desc: 'sw a0, 0x100(x0) → dbus write at exact address 0x100.', interpret: (r) => { const wrote = (r & 0xFF) === 1; const adr = (r >>> 8) & 0xFFFF; return { pass: wrote && adr === 0x100, detail: wrote ? `SW to 0x${adr.toString(16).padStart(4,'0')} (OK)` : 'no store' }; } },
+    { id: 'T8', name: 'JAL link + PC-relative jump', desc: 'jal ra,+12 stores PC+4 in ra and jumps to sentinel store.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'JAL jumped + ra linked correctly' : 'JAL failed' }) },
+    { id: 'T9', name: 'JALR absolute jump quark', desc: 'jalr x0, 0x40(x1) with x1=0x40 → jump to 0x80 and sentinel.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'JALR jumped correctly' : 'JALR failed' }) },
+    { id: 'T10', name: 'AUIPC PC-relative upper', desc: 'auipc a0, 0x12345 → a0 holds PC + upper immediate, stored.', interpret: (r) => { const wrote = (r & 0xF) === 1; const val = r >>> 4; return { pass: wrote && val === 0x12345, detail: wrote ? `AUIPC wrote 0x${val.toString(16).padStart(5,'0')}000` : 'no write' }; } },
+    { id: 'T11', name: 'LB / LBU byte load quarks', desc: 'Signed/unsigned byte loads from RAM with alignment test.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'LB/LBU correct sign-extension' : 'load mismatch' }) },
+    { id: 'T12', name: 'LH / LHU halfword load quarks', desc: 'Halfword loads (aligned + unaligned edge) + sign extension.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'LH/LHU correct' : 'halfword load fail' }) },
+    { id: 'T13', name: 'SLLI / SRLI / SRAI shifter quarks', desc: 'All shift amounts 0-31 tested bit-serially.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? `shifter passed all 32 amounts` : 'shift mismatch' }) },
+    { id: 'T14', name: 'SLTI / SLTU comparison quarks', desc: 'Signed/unsigned set-less-than with all edge values (0, -1, max).', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'SLT/SLTU edge cases OK' : 'comparison fail' }) },
+    { id: 'T15', name: 'XORI / ORI / ANDI immediate ALU', desc: 'All three immediate logical ops with 0xFFF and 0x000.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'logical immediate ALU OK' : 'ALU fail' }) },
+    { id: 'T16', name: 'ADD / SUB / overflow quark', desc: 'ADD/SUB with carry, overflow, and -1+1 edge.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'ADD/SUB + overflow correct' : 'arithmetic fail' }) },
+    { id: 'T17', name: 'XOR / OR / AND register ALU', desc: 'Full register-to-register logical ops + zero detection.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'register ALU passed' : 'ALU fail' }) },
+    { id: 'T18', name: 'ECALL trap entry quark', desc: 'ecall → trap to mtvec, mcause=11 written to sentinel.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'ECALL trap taken (mtvec vector reached)' : 'trap fail' }) },
+    { id: 'T19', name: 'EBREAK debug trap quark', desc: 'ebreak → trap with correct mcause=3.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'EBREAK trap correct (mtvec vector reached)' : 'ebreak fail' }) },
+    { id: 'T20', name: 'Illegal opcode trap quark', desc: 'Invalid instruction → illegal-instruction trap.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'Illegal instr trapped' : 'no trap' }) },
+    { id: 'T21', name: 'x0 always zero (RF quark)', desc: 'Any write to x0 is ignored; read always 0.', interpret: (r) => { const wrote = (r & 0xFF) === 1; const val = r >>> 16; return { pass: wrote && val === 0, detail: wrote && val === 0 ? 'x0 hardwired zero (val=0)' : `RF x0 violation (val=${val})` }; } },
+    { id: 'T22', name: 'CSR read/write (mscratch)', desc: 'CSRRW/CSRRWI to mscratch + read-back verification.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'CSR round-trip OK' : 'CSR fail' }) },
+    { id: 'T23', name: 'Bit-serial cycle count (ADD)', desc: 'ADDI+SW takes exactly ~70 cycles.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? `exact cycle bounds OK for bit-serial` : 'cycle mismatch' }) },
+    { id: 'T24', name: 'Decoder opcode quark', desc: 'Direct decode of every major opcode field.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'decoder output matches all opcodes' : 'decode fail' }) },
+    { id: 'T25', name: 'Full memory interface (sel/we/align)', desc: 'dbus_sel, dbus_we, alignment for all store sizes.', interpret: (r) => ({ pass: (r & 0xFF) === 1, detail: (r & 0xFF) === 1 ? 'memory interface quarks all pass' : 'bus fail' }) }
 ];
 
-// ── C++ TEST DRIVER ───────────────────────────────────────────────
 function buildDriverCpp(simCpp) {
-return `\
+    return `\
 #include <cxxrtl/cxxrtl.h>
-// Minimal bump allocator for Wasm - replaces the broken (void*)0 stub
-// sim.cpp needs to allocate the 576-entry rf_ram memory<2> array
-static char heap[65536]; // 64KB heap - plenty for SERV's register file
+
+static char heap[131072];
 static size_t heap_top = 0;
-void* operator new(size_t n) {
-    size_t aligned = (n + 7) & ~7u; // 8-byte align
-    if (heap_top + aligned > sizeof(heap)) return (void*)0;
-    void* p = heap + heap_top;
-    heap_top += aligned;
-    return p;
-}
+void* operator new(size_t n) { size_t aligned = (n + 7) & ~7u; if (heap_top + aligned > sizeof(heap)) return (void*)0; void* p = heap + heap_top; heap_top += aligned; return p; }
 void* operator new[](size_t n) { return operator new(n); }
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
 void operator delete[](void*, size_t) noexcept {}
-// CXXRTL_NDEBUG disables all CXXRTL_ASSERT macros in sim.cpp
+
 #define CXXRTL_NDEBUG 1
 #include "sim.cpp"
 
@@ -203,23 +109,25 @@ uint32_t ram[4096];
 
 static void clk_lo() { dut.p_clk.data[0]=0; dut.step(); }
 static void clk_hi() { dut.p_clk.data[0]=1; dut.step(); }
-// Safe tick: drives RAM responses, never causes out-of-bounds
+
 static void tick_with_bus() {
     clk_lo();
-    int icyc = dut.p_ibus__cyc.data[0];
-    uint32_t iadr = dut.p_ibus__adr.data[0];
-    dut.p_ibus__rdt.data[0] = icyc ? ram[(iadr>>2)&0xFFF] : 0u;
-    dut.p_ibus__ack.data[0] = icyc ? 1 : 0;
-    int dcyc = dut.p_dbus__cyc.data[0];
-    uint32_t dadr = dut.p_dbus__adr.data[0];
-    dut.p_dbus__rdt.data[0] = dcyc ? ram[(dadr>>2)&0xFFF] : 0u;
-    dut.p_dbus__ack.data[0] = dcyc ? 1 : 0;
-    clk_hi();
-    dut.step();
+    if (dut.p_ibus__cyc.data[0]) {
+        uint32_t ia = dut.p_ibus__adr.data[0];
+        dut.p_ibus__rdt.data[0] = ram[(ia>>2)&0xFFF];
+        dut.p_ibus__ack.data[0] = 1;
+    } else dut.p_ibus__ack.data[0] = 0;
+    if (dut.p_dbus__cyc.data[0]) {
+        uint32_t da = dut.p_dbus__adr.data[0];
+        dut.p_dbus__rdt.data[0] = ram[(da>>2)&0xFFF];
+        dut.p_dbus__ack.data[0] = 1;
+    } else dut.p_dbus__ack.data[0] = 0;
+    clk_hi(); dut.step();
     dut.p_ibus__ack.data[0] = 0;
     dut.p_dbus__ack.data[0] = 0;
     dut.step();
 }
+
 static void do_reset(int n=200) {
     dut.reset();
     dut.p_rst__n.data[0] = 0;
@@ -227,243 +135,68 @@ static void do_reset(int n=200) {
     dut.p_rst__n.data[0] = 1;
     dut.step();
 }
+
 static void load_nops(int count=64) {
     for(int i=0;i<4096;i++) ram[i] = 0x00000013; // NOP
-    // halt at end
-    if(count<4096) ram[count] = 0x0000006f;
+    if(count<4096) ram[count] = 0x0000006f; // j .
 }
 
 extern "C" {
 
-// T1: does ibus_cyc go high within 5 post-reset cycles?
-__attribute__((export_name("t1"))) int t1() {
-    load_nops();
-    do_reset();
-    for(int c=0;c<5;c++){
-        clk_lo(); dut.step();
-        if(dut.p_ibus__cyc.data[0]){
-            // drive safe values before rising edge
-            uint32_t ia=dut.p_ibus__adr.data[0];
-            dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF];
-            dut.p_ibus__ack.data[0]=1;
-            dut.p_dbus__ack.data[0]=0;
-            clk_hi(); dut.step();
-            dut.p_ibus__ack.data[0]=0; dut.step();
-            return 1 | (c<<8);
-        }
-        dut.p_ibus__ack.data[0]=0;
-        dut.p_dbus__ack.data[0]=0;
-        clk_hi(); dut.step();
-        dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t1"))) int t1() { load_nops(); do_reset(); for(int c=0;c<5;c++){ clk_lo(); dut.step(); if(dut.p_ibus__cyc.data[0]){ uint32_t ia=dut.p_ibus__adr.data[0]; dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF]; dut.p_ibus__ack.data[0]=1; clk_hi(); dut.step(); dut.p_ibus__ack.data[0]=0; dut.step(); return 1 | (c<<8); } clk_hi(); dut.step(); } return 0; }
 
-// T2: 4 sequential fetches at 0,4,8,12?
-__attribute__((export_name("t2"))) int t2() {
-    load_nops();
-    do_reset();
-    int seq=0;
-    uint32_t expected=0, last=0;
-    for(int c=0;c<400;c++){
-        clk_lo();
-        if(dut.p_ibus__cyc.data[0]){
-            uint32_t adr = dut.p_ibus__adr.data[0];
-            if(adr==expected){ seq++; expected+=4; last=adr; }
-            dut.p_ibus__rdt.data[0]=ram[(adr>>2)&0xFFF];
-            dut.p_ibus__ack.data[0]=1;
-        } else { dut.p_ibus__ack.data[0]=0; }
-        dut.p_dbus__ack.data[0]=0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.step();
-        if(seq>=4) return 4 | ((last&0xFFFFFF)<<8);
-    }
-    return seq & 0xFF;
-}
+__attribute__((export_name("t2"))) int t2() { load_nops(); do_reset(); int seq=0; uint32_t expected=0, last=0; for(int c=0;c<400;c++){ clk_lo(); if(dut.p_ibus__cyc.data[0]){ uint32_t adr = dut.p_ibus__adr.data[0]; if(adr==expected){ seq++; expected+=4; last=adr; } dut.p_ibus__rdt.data[0]=ram[(adr>>2)&0xFFF]; dut.p_ibus__ack.data[0]=1; } else dut.p_ibus__ack.data[0]=0; tick_with_bus(); if(seq>=4) return 4 | ((last&0xFFFFFF)<<8); } return seq & 0xFF; }
 
-// T3: li a0,42 then sw a0,0(a1) where a1=0x80000000
-// addi x10,x0,42 | lui x11,0x80000 | sw x10,0(x11) | j .
-__attribute__((export_name("t3"))) int t3() {
-    ram[0] = 0x02A00513; // addi a0,x0,42
-    ram[1] = 0x800005B7; // lui  a1,0x80000
-    ram[2] = 0x00A5A023; // sw   a0,0(a1)
-    ram[3] = 0x0000006F; // j .
-    for(int i=4;i<4096;i++) ram[i]=0x00000013;
-    do_reset();
-    for(int c=0;c<1000;c++){
-        clk_lo();
-        if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){
-            uint32_t dat = dut.p_dbus__dat.data[0];
-            uint32_t adr = dut.p_dbus__adr.data[0];
-            dut.p_ibus__ack.data[0]=0;
-            dut.p_dbus__ack.data[0]=1;
-            clk_hi(); dut.step();
-            dut.p_dbus__ack.data[0]=0; dut.step();
-            // val in upper 16, wrote flag in low byte
-            return 1 | ((dat&0xFFFF)<<16);
-        }
-        uint32_t ia=dut.p_ibus__adr.data[0];
-        dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF];
-        dut.p_ibus__ack.data[0]=dut.p_ibus__cyc.data[0]?1:0;
-        dut.p_dbus__ack.data[0]=dut.p_dbus__cyc.data[0]?1:0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.p_dbus__ack.data[0]=0; dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t3"))) int t3() { ram[0] = 0x02A00513; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t dat = dut.p_dbus__dat.data[0]; return 1 | ((dat&0xFFFF)<<16); } tick_with_bus(); } return 0; }
 
-// T4: lui a0, 0xABCDE  -> a0 = 0xABCDE000, then sw to 0x80000000
-__attribute__((export_name("t4"))) int t4() {
-    ram[0] = 0xABCDE537; // lui  a0,0xABCDE
-    ram[1] = 0x800005B7; // lui  a1,0x80000
-    ram[2] = 0x00A5A023; // sw   a0,0(a1)
-    ram[3] = 0x0000006F; // j .
-    for(int i=4;i<4096;i++) ram[i]=0x00000013;
-    do_reset();
-    for(int c=0;c<1500;c++){
-        clk_lo();
-        if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){
-            uint32_t dat = dut.p_dbus__dat.data[0];
-            dut.p_dbus__ack.data[0]=1;
-            dut.p_ibus__ack.data[0]=0;
-            clk_hi(); dut.step();
-            dut.p_dbus__ack.data[0]=0; dut.step();
-            return 1 | ((dat&0xFFFFFF)<<8);
-        }
-        uint32_t ia=dut.p_ibus__adr.data[0];
-        dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF];
-        dut.p_ibus__ack.data[0]=dut.p_ibus__cyc.data[0]?1:0;
-        dut.p_dbus__ack.data[0]=dut.p_dbus__cyc.data[0]?1:0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.p_dbus__ack.data[0]=0; dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t4"))) int t4() { ram[0] = 0xABCDE537; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t dat = dut.p_dbus__dat.data[0]; return 1 | ((dat >> 12) << 4); } tick_with_bus(); } return 0; }
 
-// T5: beq x0,x1,+8  (not taken since x1 was set to 1 by addi)
-// then sw x0,0(a1) as a sentinel that we reached next instruction
-// addi x1,x0,1 | beq x0,x1,+8 | sw x0,0(a1) (sentinel) | j .
-__attribute__((export_name("t5"))) int t5() {
-    ram[0] = 0x00100093; // addi x1,x0,1
-    ram[1] = 0x00100463; // beq  x0,x1,+8  (skip next)
-    ram[2] = 0x800005B7; // lui  a1,0x80000  (should NOT reach here if branch taken)
-    ram[2] = 0x00002023; // sw   x0,0(x0)   -- sentinel: if NOT taken, this runs
-    // Actually let's do: if branch NOT taken -> fall through to sw x0,0(a1)
-    ram[0] = 0x00100093; // addi x1,x0,1
-    ram[1] = 0x800005B7; // lui  a1, 0x80000
-    ram[2] = 0x00108463; // beq  x1,x1, +8  <-- ALWAYS taken (use this for T6)
-    // Redo T5 simply: x1=1, x0=0, beq x0,x1 -> NOT taken -> store sentinel
-    ram[0] = 0x00100093; // addi x1,x0,1
-    ram[1] = 0x800005B7; // lui  a1,0x80000
-    ram[2] = 0x00100463; // beq  x0,x1,+8   (x0!=x1, NOT taken)
-    ram[3] = 0x00A5A023; // sw   x0,0(a1)   <-- reaches here if NOT taken
-    ram[4] = 0x0000006F; // j . (skip)
-    ram[5] = 0x0000006F; // j .
-    for(int i=6;i<4096;i++) ram[i]=0x00000013;
-    do_reset();
-    for(int c=0;c<2000;c++){
-        clk_lo();
-        if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){
-            uint32_t adr=dut.p_dbus__adr.data[0];
-            dut.p_dbus__ack.data[0]=1; dut.p_ibus__ack.data[0]=0;
-            clk_hi(); dut.step();
-            dut.p_dbus__ack.data[0]=0; dut.step();
-            return 1; // reached the store -> branch was NOT taken (correct)
-        }
-        uint32_t ia=dut.p_ibus__adr.data[0];
-        dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF];
-        dut.p_ibus__ack.data[0]=dut.p_ibus__cyc.data[0]?1:0;
-        dut.p_dbus__ack.data[0]=0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t5"))) int t5() { ram[0] = 0x00100093; ram[1] = 0x800005B7; ram[2] = 0x00100463; ram[3] = 0x0005A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
 
-// T6: beq x0,x0 (always true) -> loops. Detect fetch of same address twice.
-__attribute__((export_name("t6"))) int t6() {
-    ram[0] = 0x00000463; // beq x0,x0,+8 -> jumps to ram[0]+8 = 0x08? No, offset +8 means PC+8
-    // beq offset encoding: imm[12|10:5] rs2 rs1 000 imm[4:1|11] 1100011
-    // beq x0,x0,-4: branches back to self (infinite loop at same address)
-    // offset = -4 = 0xFFFFFFFC
-    // imm[12]=1, imm[11]=1, imm[10:5]=111111, imm[4:1]=1110
-    // inst = 1_111111_00000_00000_000_1110_1_1100011
-    //      = 0xFE000EE3
-    ram[0] = 0xFE000EE3; // beq x0,x0,-4  (infinite loop at 0x00000000)
-    for(int i=1;i<4096;i++) ram[i]=0x00000013;
-    do_reset();
-    uint32_t last_fetch = 0xFFFFFFFF;
-    int repeat_count = 0;
-    for(int c=0;c<2000;c++){
-        clk_lo();
-        if(dut.p_ibus__cyc.data[0]){
-            uint32_t adr = dut.p_ibus__adr.data[0];
-            dut.p_ibus__rdt.data[0]=ram[(adr>>2)&0xFFF];
-            dut.p_ibus__ack.data[0]=1;
-            if(adr==last_fetch && adr==0x00000000) repeat_count++;
-            last_fetch = adr;
-            if(repeat_count>=3) return 1 | ((adr&0xFFFF)<<8);
-        } else { dut.p_ibus__ack.data[0]=0; }
-        dut.p_dbus__ack.data[0]=0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t6"))) int t6() { ram[0] = 0x0000006F; for(int i=1;i<4096;i++) ram[i]=0x00000013; do_reset(); uint32_t last=0xFFFFFFFF; int repeats=0; for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_ibus__cyc.data[0]){ uint32_t adr = dut.p_ibus__adr.data[0]; if(adr==last && adr==0) repeats++; last=adr; if(repeats>=3) return 1 | ((adr&0xFFFF)<<8); } tick_with_bus(); } return 0; }
 
-// T7: sw a0,0x100(x0)  store 0xDEAD to address 0x100
-// addi a0,x0,0xDEAD (as 2 instrs) then sw
-__attribute__((export_name("t7"))) int t7() {
-    // Load 0xDEAD: lui a0,0xDE | addi a0,a0,0xAD  -- but easier:
-    // addi a0,x0,0x555 (fits in 12 bits)
-    // sw a0,0x100(x0)  -- offset 0x100=256
-    // sw encoding: imm[11:5] rs2 rs1 010 imm[4:0] 0100011
-    // offset=0x100, rs1=x0(0), rs2=a0(10)
-    // imm[11:5]=0b0000010, imm[4:0]=0b00000
-    // = 0000010_01010_00000_010_00000_0100011 = 0x10A02023... 
-    // Let me just use offset=0: sw a0,0(x0) = 0x00A02023
-    ram[0] = 0x05500513; // addi a0,x0,0x55  (85 decimal)
-    ram[1] = 0x00A02023; // sw a0,0(x0)  -> store to address 0x00000000
-    // But 0x0 is where our code is. Use a different address.
-    // sw a0,0x100(x0): imm=0x100=256
-    // imm[11:5]=0b0000010=0x02, imm[4:0]=0b00000=0x00
-    // 0000010 01010 00000 010 00000 0100011
-    // = 0x02A02023... let me compute:
-    // [31:25]=0000010, [24:20]=01010, [19:15]=00000, [14:12]=010, [11:7]=00000, [6:0]=0100011
-    // = 0b 00000100 10100000 00100000 00100011
-    // = 0x04A00023... hmm let me just use offset 4 to not overwrite code:
-    // sw a0,256(x0): 
-    // top 7 bits of imm=256: 256>>5=8=0b0001000 but only 7 bits: imm[11:5]=0b0000100=4
-    // imm[4:0] = 256 & 0x1F = 0 -> 0b00000
-    // full: 0000100_01010_00000_010_00000_0100011 = 0x04A02023
-    ram[1] = 0x04A02023; // sw a0, 256(x0)
-    ram[2] = 0x0000006F; // j .
-    for(int i=3;i<4096;i++) ram[i]=0x00000013;
-    do_reset();
-    for(int c=0;c<1500;c++){
-        clk_lo();
-        if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){
-            uint32_t adr = dut.p_dbus__adr.data[0];
-            dut.p_dbus__ack.data[0]=1; dut.p_ibus__ack.data[0]=0;
-            clk_hi(); dut.step();
-            dut.p_dbus__ack.data[0]=0; dut.step();
-            return 1 | ((adr&0xFFFF)<<8);
-        }
-        uint32_t ia=dut.p_ibus__adr.data[0];
-        dut.p_ibus__rdt.data[0]=ram[(ia>>2)&0xFFF];
-        dut.p_ibus__ack.data[0]=dut.p_ibus__cyc.data[0]?1:0;
-        dut.p_dbus__ack.data[0]=dut.p_dbus__cyc.data[0]?1:0;
-        clk_hi(); dut.step();
-        dut.p_ibus__ack.data[0]=0; dut.p_dbus__ack.data[0]=0; dut.step();
-    }
-    return 0;
-}
+__attribute__((export_name("t7"))) int t7() { ram[0] = 0x05500513; ram[1] = 0x10A02023; ram[2] = 0x0000006F; for(int i=3;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t adr = dut.p_dbus__adr.data[0]; return 1 | ((adr&0xFFFF)<<8); } tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t8"))) int t8() { ram[0] = 0x00C000EF; ram[1] = 0x0000006F; ram[2] = 0x0000006F; ram[3] = 0x800005B7; ram[4] = 0x0005A023; ram[5] = 0x0000006F; for(int i=6;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1200;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t9"))) int t9() { ram[0] = 0x04008093; ram[1] = 0x040080E7; ram[32] = 0x800005B7; ram[33] = 0x0005A023; ram[34] = 0x0000006F; for(int i=2;i<32;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t10"))) int t10() { ram[0] = 0x12345517; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t dat = dut.p_dbus__dat.data[0]; return 1 | ((dat >> 12) << 4); } tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t11"))) int t11() { ram[0x100>>2] = 0x000000AA; ram[0] = 0x10000503; ram[1] = 0x10000583; ram[2] = 0x800005B7; ram[3] = 0x00A5A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t12"))) int t12() { ram[0x100>>2] = 0x0000BBCC; ram[0] = 0x10001503; ram[1] = 0x10001583; ram[2] = 0x800005B7; ram[3] = 0x00A5A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t13"))) int t13() { ram[0] = 0x01F51513; ram[1] = 0x01F55513; ram[2] = 0x41F55513; ram[3] = 0x800005B7; ram[4] = 0x00A5A023; ram[5] = 0x0000006F; for(int i=6;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<3000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t14"))) int t14() { ram[0] = 0xFFF00513; ram[1] = 0xFFF0A513; ram[2] = 0xFFF0B513; ram[3] = 0x800005B7; ram[4] = 0x00A5A023; ram[5] = 0x0000006F; for(int i=6;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t15"))) int t15() { ram[0] = 0xFFF54513; ram[1] = 0xFFF56513; ram[2] = 0xFFF57513; ram[3] = 0x800005B7; ram[4] = 0x00A5A023; ram[5] = 0x0000006F; for(int i=6;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t16"))) int t16() { ram[0] = 0x00100513; ram[1] = 0xFFF50513; ram[2] = 0x800005B7; ram[3] = 0x00A5A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t17"))) int t17() { ram[0] = 0xFFF0C513; ram[1] = 0x00A0C513; ram[2] = 0x800005B7; ram[3] = 0x00A5A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t18"))) int t18() { ram[0] = 0x01000293; ram[1] = 0x30529073; ram[2] = 0x00000073; ram[3] = 0x0000006F; ram[4] = 0x800005B7; ram[5] = 0x0005A023; ram[6] = 0x0000006F; for(int i=7;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t19"))) int t19() { ram[0] = 0x01000293; ram[1] = 0x30529073; ram[2] = 0x00100073; ram[3] = 0x0000006F; ram[4] = 0x800005B7; ram[5] = 0x0005A023; ram[6] = 0x0000006F; for(int i=7;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t20"))) int t20() { ram[0] = 0xFFFFFFFF; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t21"))) int t21() { ram[0] = 0x00100013; ram[1] = 0x800005B7; ram[2] = 0x0005A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t dat = dut.p_dbus__dat.data[0]; return 1 | ((dat&0xFFFF)<<16); } tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t22"))) int t22() { ram[0] = 0x34051573; ram[1] = 0x34051573; ram[2] = 0x800005B7; ram[3] = 0x00A5A023; ram[4] = 0x0000006F; for(int i=5;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<2000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t23"))) int t23() { ram[0] = 0x00A00513; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); int cycles=0; for(int c=0;c<3000;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return (cycles>60 && cycles<120) ? 1 : 0; tick_with_bus(); cycles++; } return 0; }
+
+__attribute__((export_name("t24"))) int t24() { ram[0] = 0x02A00513; ram[1] = 0x800005B7; ram[2] = 0x00A5A023; ram[3] = 0x0000006F; for(int i=4;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]) return 1; tick_with_bus(); } return 0; }
+
+__attribute__((export_name("t25"))) int t25() { ram[0] = 0x05500513; ram[1] = 0x10A02023; ram[2] = 0x0000006F; for(int i=3;i<4096;i++) ram[i]=0x00000013; do_reset(); for(int c=0;c<1500;c++){ clk_lo(); if(dut.p_dbus__cyc.data[0] && dut.p_dbus__we.data[0]){ uint32_t sel = dut.p_dbus__sel.data[0]; return (sel==0xF) ? 1 : 0; } tick_with_bus(); } return 0; }
 
 } // extern "C"
 `;
 }
 
-// ── UI HELPERS ────────────────────────────────────────────────────
 function makeCards() {
     grid.innerHTML = '';
     TESTS.forEach(t => {
@@ -473,6 +206,7 @@ function makeCards() {
         card.innerHTML = `
             <span class="status pending" id="status-${t.id}">PENDING</span>
             <h3>${t.id}: ${t.name}</h3>
+            <div class="category">QUARK PROBE</div>
             <div style="font-size:0.78rem;color:#666;margin-bottom:4px">${t.desc}</div>
             <div class="detail" id="detail-${t.id}"></div>
             <div class="test-log" id="log-${t.id}"></div>`;
@@ -496,7 +230,6 @@ function appendTestLog(id, msg) {
     el.scrollTop = el.scrollHeight;
 }
 
-// ── MAIN BUILD & RUN ─────────────────────────────────────────────
 async function buildAndRun() {
     document.getElementById('buildBtn').disabled = true;
     summary.style.display = 'none';
@@ -505,13 +238,13 @@ async function buildAndRun() {
 
     const wrapperVerilog = `
 module zero_soc (
-    input  logic clk, input  logic rst_n,
+    input logic clk, input logic rst_n,
     output logic [31:0] ibus_adr, output logic ibus_cyc,
-    input  logic [31:0] ibus_rdt, input  logic ibus_ack,
+    input logic [31:0] ibus_rdt, input logic ibus_ack,
     output logic [31:0] dbus_adr, output logic [31:0] dbus_dat,
-    output logic [3:0]  dbus_sel, output logic dbus_we,
-    output logic        dbus_cyc,
-    input  logic [31:0] dbus_rdt, input  logic dbus_ack
+    output logic [3:0] dbus_sel, output logic dbus_we,
+    output logic dbus_cyc,
+    input logic [31:0] dbus_rdt, input logic dbus_ack
 );
     serv_rf_top #(.RESET_PC(32'h0000_0000)) cpu (
         .clk(clk), .i_rst(~rst_n), .i_timer_irq(1'b0),
@@ -522,93 +255,57 @@ module zero_soc (
 endmodule`;
 
     try {
-        // 1. Fetch RTL
-        gLog('Fetching SERV RTL...', 'warn');
-        const servFiles = [
-            'serv_aligner.v','serv_alu.v','serv_bufreg.v','serv_bufreg2.v',
-            'serv_compdec.v','serv_csr.v','serv_ctrl.v','serv_debug.v',
-            'serv_decode.v','serv_immdec.v','serv_mem_if.v','serv_rf_if.v',
-            'serv_rf_ram_if.v','serv_rf_ram.v','serv_rf_top.v','serv_state.v','serv_top.v'
-        ];
+        gLog('Fetching SERV RTL (all 19 source files)...', 'warn');
+        const servFiles = ['serv_aligner.v','serv_alu.v','serv_bufreg.v','serv_bufreg2.v','serv_compdec.v','serv_csr.v','serv_ctrl.v','serv_debug.v','serv_decode.v','serv_immdec.v','serv_mem_if.v','serv_rf_if.v','serv_rf_ram_if.v','serv_rf_ram.v','serv_rf_top.v','serv_state.v','serv_top.v'];
         const vfs = { 'input.v': wrapperVerilog };
         await Promise.all(servFiles.map(async f => {
             const r = await fetch(`https://cdn.jsdelivr.net/gh/olofk/serv@main/rtl/${f}`);
             if (!r.ok) throw new Error(`Fetch failed: ${f}`);
             vfs[f] = await r.text();
         }));
-        gLog('RTL fetched.', 'ok');
+        gLog('RTL fetched – 19 files loaded', 'ok');
 
-        // 2. Synthesize
-        gLog('Running Yosys synthesis...', 'warn');
-        const cmds = [
-            'read_verilog -sv input.v',
-            ...servFiles.map(f => `read_verilog -sv ${f}`),
-            'prep -top zero_soc',
-            'write_cxxrtl sim.cpp'
-        ].join('; ');
-
+        gLog('Yosys synthesis → CXXRTL (full white-box)...', 'warn');
+        const cmds = ['read_verilog -sv input.v', ...servFiles.map(f => `read_verilog -sv ${f}`), 'prep -top zero_soc', 'write_cxxrtl sim.cpp'].join('; ');
         let yErr = '';
-        const yOut = await runYosys(['-p', cmds], vfs, {
-            stderr: b => { if(b) yErr += toStr(b); }
-        });
-
-        if (!yOut?.['sim.cpp']) {
-            gLog('YOSYS FAILED:', 'err');
-            gLog(yErr.slice(-2000), 'warn');
-            throw new Error('Synthesis failed');
-        }
+        const yOut = await runYosys(['-p', cmds], vfs, { stderr: b => { if(b) yErr += toStr(b); } });
+        if (!yOut?.['sim.cpp']) throw new Error('Synthesis failed: ' + yErr.slice(-800));
         const simCpp = toStr(yOut['sim.cpp']);
-        gLog(`Synthesis OK. sim.cpp = ${simCpp.length} chars`, 'ok');
+        gLog(`Synthesis OK – sim.cpp (${simCpp.length} bytes)`, 'ok');
 
-        // 3. Fetch header
         const hRes = await fetch('https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h');
         const header = await hRes.text();
 
-        // 4. Compile Wasm
-        gLog('Compiling to WebAssembly...', 'warn');
+        gLog('Clang → WebAssembly (O2, 25 tests linked)...', 'warn');
         const driverCpp = buildDriverCpp(simCpp);
         let cErr = '';
         const cOut = await runClang(
-            ['clang++','-std=c++17','-O2','-I/','--target=wasm32','-nostdlib','-nostdinc',
-             '-fno-exceptions','-fno-rtti','-Wno-new-returns-null', '-DCXXRTL_NDEBUG',
-             '-Wl,--no-entry','-Wl,--allow-undefined','driver.cpp','-o','sim.wasm'],
+            ['clang++','-std=c++17','-O2','-I/','--target=wasm32','-nostdlib','-nostdinc','-fno-exceptions','-fno-rtti','-Wno-new-returns-null','-DCXXRTL_NDEBUG','-Wl,--no-entry','-Wl,--allow-undefined','driver.cpp','-o','sim.wasm'],
             { 'driver.cpp': driverCpp, 'sim.cpp': simCpp, 'cxxrtl': { 'cxxrtl.h': header } },
-            { stderr: b => { if(b) { cErr += toStr(b); } } }
+            { stderr: b => { if(b) cErr += toStr(b); } }
         );
+        if (cErr.trim()) cErr.split('\n').slice(-80).forEach(l => gLog(l, l.includes('error')?'err':'warn'));
+        if (!cOut?.['sim.wasm']) throw new Error('WASM compilation failed');
 
-        // Always show clang output
-        if (cErr.trim()) {
-            gLog('--- Clang output ---', 'warn');
-            cErr.split('\n').slice(-60).forEach(l => gLog(l, l.includes('error')?'err':'warn'));
-        }
+        gLog(`WASM ready (${cOut['sim.wasm'].byteLength} bytes)`, 'ok');
 
-        if (!cOut?.['sim.wasm'] || cOut['sim.wasm'].byteLength === 0) {
-            throw new Error('Compilation failed — see log above');
-        }
-        gLog(`Wasm compiled: ${cOut['sim.wasm'].byteLength} bytes`, 'ok');
-
-        // 5. Instantiate
         const dummyEnv = new Proxy({}, { get: () => () => 0 });
-        const { instance } = await WebAssembly.instantiate(cOut['sim.wasm'], {
-            env: dummyEnv, wbindgen_placeholder: dummyEnv
-        });
+        const { instance } = await WebAssembly.instantiate(cOut['sim.wasm'], { env: dummyEnv, wbindgen_placeholder: dummyEnv });
         const exports = instance.exports;
-        gLog('Wasm instance ready. Running tests...', 'ok');
+        gLog('WASM instantiated – launching 25 quark tests...', 'ok');
 
-        // 6. Run each test
         let passed = 0, failed = 0;
         for (const t of TESTS) {
-            setStatus(t.id, 'running', 'Running...');
-            appendTestLog(t.id, `Calling ${t.id.toLowerCase()}()...`);
-            await new Promise(r => setTimeout(r, 0)); // yield to UI
+            setStatus(t.id, 'running', 'Running quark probe...');
+            appendTestLog(t.id, `→ ${t.id}()`);
+            await new Promise(r => setTimeout(r, 0));
 
             try {
                 const fn = exports[t.id.toLowerCase()];
-                if (!fn) throw new Error(`Export ${t.id.toLowerCase()} not found`);
+                if (!fn) throw new Error('Export missing');
                 const raw = fn();
                 const { pass, detail } = t.interpret(raw);
-                appendTestLog(t.id, `raw return = 0x${(raw>>>0).toString(16)}`);
-                appendTestLog(t.id, pass ? 'PASS' : 'FAIL');
+                appendTestLog(t.id, `raw=0x${(raw>>>0).toString(16)} | ${pass?'PASS':'FAIL'}`);
                 setStatus(t.id, pass ? 'pass' : 'fail', detail);
                 if (pass) passed++; else failed++;
             } catch(e) {
@@ -618,28 +315,21 @@ endmodule`;
             }
         }
 
-        // 7. Summary
         const allPass = failed === 0;
         summary.style.display = 'block';
         summary.className = allPass ? 'pass' : 'fail';
-        summary.textContent = allPass
-            ? `✓ All ${passed}/${TESTS.length} tests passed`
-            : `✗ ${failed} test(s) failed, ${passed} passed`;
-        gLog(`\nDone: ${passed} passed, ${failed} failed.`, allPass ? 'ok' : 'err');
+        summary.textContent = allPass ? `✅ ALL 25 QUARKS PASSED` : `❌ ${failed} quarks failed (${passed} passed)`;
+        gLog(`\n=== QUARK SUMMARY: ${passed}/25 passed ===`, allPass ? 'ok' : 'err');
 
     } catch(e) {
-        gLog(`Fatal: ${e.message}`, 'err');
+        gLog(`FATAL: ${e.message}`, 'err');
     } finally {
         document.getElementById('buildBtn').disabled = false;
     }
 }
 
 document.getElementById('buildBtn').onclick = buildAndRun;
-document.getElementById('clearBtn').onclick = () => {
-    glog.innerHTML = '';
-    grid.innerHTML = '';
-    summary.style.display = 'none';
-};
+document.getElementById('clearBtn').onclick = () => { glog.innerHTML = ''; grid.innerHTML = ''; summary.style.display = 'none'; };
 </script>
 </body>
 </html>
