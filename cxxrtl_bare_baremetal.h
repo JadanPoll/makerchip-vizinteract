@@ -6,6 +6,8 @@
 /* Notes: Generating .VCD and debugging are possible but not implmenet because frankly im not too invested in those features and force our hand
   into finding and impelementing more workarounds for the STL. Its doable if you implement some other stuff in the reference however. Be prepared for a lot of work though!
   In the future, I will make sure to document every singular thing this baremetal implementation leaves out from the original
+  Thing's like $display, $finish etc. are very much possible but require advanced of this baremetal library. 
+  Please note that unless using STL, implementing more STL heavy stuff balloon the complexity. ESPECIALLY things like templatization (Turing complete btw)
 */
 // Tip: You can potentially use a compressed string version of this via Gzip + Base64 fallback so you can use offline. requires some coding on your part however
 // IMPORTANT: IF ANYTHING ERRORS in compilation, 90% of the time, its because a valid call does not have its stub implemented here, especially some debug calls
