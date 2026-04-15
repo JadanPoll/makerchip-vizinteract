@@ -3,8 +3,10 @@
 // Notes: Instaniates 16MB for potential RAM use(maximum wasm limit). There are probably tons of optimizations in here
 // Notes: You can easily inline this in your code so dont have to deal with CORS annoyances. I just really want a most-stable version that wont change.
 // Notes: If there's any feature you want but not in this, look at the reference for whats supported, you can then do the necessary translation to patch it in
-// Notes: Generating .VCD and debugging are possible but not implmenet because frankly im not too invested in those features and force our hand
-// into finding and impelementing more workarounds for the STL. Its doable if you implement some other stuff in the reference however. Be prepared for a lot of work though!
+/* Notes: Generating .VCD and debugging are possible but not implmenet because frankly im not too invested in those features and force our hand
+  into finding and impelementing more workarounds for the STL. Its doable if you implement some other stuff in the reference however. Be prepared for a lot of work though!
+  In the future, I will make sure to document every singular thing this baremetal implementation leaves out from the original
+*/
 #ifndef BARE_CXXRTL_H
 #define BARE_CXXRTL_H
 
