@@ -466,13 +466,13 @@ namespace cxxrtl_yosys {
     template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> bwmux(const value<A> &a, const value<A> &b, const value<B> &c) { return a.bwmux(b, c); }
     template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> demux(const value<A> &a, const value<B> &b) { return a.template demux<Y>(b); }
 }
-#define assert(x)
+#define assert(x) ((void)0)
 // Nathan: Sometimes it looks for this so we have this here
 #ifndef CXXRTL_ASSERT
 #ifndef CXXRTL_NDEBUG
 #define CXXRTL_ASSERT(x) assert(x)
 #else
-#define CXXRTL_ASSERT(x)
+#define CXXRTL_ASSERT(x) ((void)0) // cause compiler warnings
 #endif
 #endif
 #endif
