@@ -2,7 +2,7 @@
 // only with -nostdlib
 // Notes: Instaniates 16MB for potential RAM use(maximum wasm limit). There are probably tons of optimizations in here
 // Notes: You can easily inline this in your code so dont have to deal with CORS annoyances. I just really want a most-stable version that wont change.
-
+// Notes: If there's any feature you want but not in this, look at the reference for whats supported, you can then do the necessary translation to patch it in
 #ifndef BARE_CXXRTL_H
 #define BARE_CXXRTL_H
 
