@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beast Mode EDA: SERV RISC-V Core</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; margin: 0; }
+        h2 { color: #f97171; margin-top: 0; font-size: 1.6rem; text-transform: uppercase; letter-spacing: 1px; }
+        h3 { color: #9cdcfe; margin: 0 0 10px; font-size: 1.05rem; }
+        p { margin: 0 0 10px; line-height: 1.5; color: #b0b8c8; font-size: 0.9rem; }
+        button { padding: 11px 22px; font-size: 1rem; background: #1565c0; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; margin-right: 10px; margin-bottom: 8px; transition: background 0.15s; }
+        button:hover:not(:disabled) { background: #1e88e5; }
+        button:disabled { opacity: 0.45; cursor: not-allowed; }
+        button.green { background: #2e7d32; }
+        button.green:hover:not(:disabled) { background: #388e3c; }
+        button.red { background: #c62828; }
+        button.red:hover:not(:disabled) { background: #e53935; }
+        
+        .panel { background: #1e2030; border: 1px solid #2a3050; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        #console-log { height: 260px; overflow-y: auto; color: #9cdcfe; white-space: pre-wrap; font-family: monospace; font-size: 0.82rem; border: 1px solid #2a3050; background: #0d0f1a; padding: 10px; border-radius: 6px; line-height: 1.5; }
+        .log-err { color: #f97171; }
+        .log-ok { color: #69db7c; }
+        .log-warn { color: #ffd43b; }
+        
+        .schematic-container { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+        .schematic-box { flex: 1; min-width: min(100%, 480px); background: #fff; padding: 14px; border-radius: 8px; overflow: hidden; min-height: 400px; border: 2px solid #1565c0; }
+        .schematic-box h3 { color: #1a237e; font-size: 0.85rem; margin-bottom: 8px; }
+        .schematic-box svg { width: 100%; height: 400px; display: block; border: 1px solid #eee; background: #fafafa; cursor: grab; }
+        .schematic-box svg:active { cursor: grabbing; }
+
+        .cpp-box { background: #0d0f1a; color: #ce9178; padding: 12px; border-radius: 8px; border: 1px solid #3a2a1a; height: 300px; overflow: auto; font-family: monospace; white-space: pre; font-size: 0.8rem; line-height: 1.45; }
+        .wasm-box { background: #0d0f1a; color: #f97171; padding: 12px; border-radius: 8px; border: 1px solid #2a3050; min-height: 80px; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; }
+        .tag-ok { background: #1b4332; color: #69db7c; padding: 3px 8px; border-radius: 4px; font-size: 0.8rem; }
+        textarea { width: 100%; height: 450px; font-family: monospace; font-size: 0.85rem; background: #0d0f1a; color: #ce9178; border: 1px solid #3a2a1a; border-radius: 6px; padding: 12px; resize: vertical; line-height: 1.45; }
+        .hidden { display: none; }
+        
+        /* UART Terminal */
+        #uart-terminal { background: #000; color: #0f0; font-family: 'Courier New', Courier, monospace; font-size: 1.2rem; padding: 15px; border-radius: 6px; border: 2px solid #333; height: 150px; overflow-y: auto; white-space: pre-wrap; letter-spacing: 1px; box-shadow: inset 0 0 10px #000; }
+        .blink { animation: blinker 1s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0; } }
+    </style>
+</head>
+<body>
+    <h2>🔥 Beast Mode: Full RISC-V SoC Extractor</h2>
+    <p>Fetching <strong>SERV</strong> (the world's smallest RISC-V core) from GitHub, wrapping it in Wishbone memory, and compiling to Wasm.</p>
+    
+    <div style="margin-bottom: 16px;">
+        <button id="runBtn" class="red">▶ 1. Fetch SERV & Synthesize</button>
+        <button id="clangBtn" class="green" disabled>⚙ 2. Compile to Wasm Engine</button>
+    </div>
+    
+    <div class="panel">
+        <h3>SystemVerilog: The "Zero_SoC" Wishbone Wrapper</h3>
+        <textarea id="verilogInput" spellcheck="false">module zero_soc (
+    input  logic clk,
+    input  logic rst_n,
+    
+    // Instruction Bus (I-Bus) Exported to C++ RAM
+    output logic [31:0] ibus_adr,
+    output logic        ibus_cyc,
+    input  logic [31:0] ibus_rdt,
+    input  logic        ibus_ack,
+    
+    // Data Bus (D-Bus) Exported to C++ RAM / UART
+    output logic [31:0] dbus_adr,
+    output logic [31:0] dbus_dat,
+    output logic [3:0]  dbus_sel,
+    output logic        dbus_we,
+    output logic        dbus_cyc,
+    input  logic [31:0] dbus_rdt,
+    input  logic        dbus_ack
+);
+
+    // Instantiate the official SERV RISC-V Core
+    serv_top #(
+        .RESET_PC(32'h0000_0000)
+    ) cpu (
+        .clk      (clk),
+        .i_rst    (~rst_n),    // SERV expects active-high reset
+        .i_timer_irq(1'b0),
+        
+        // I-Bus Map
+        .o_ibus_adr (ibus_adr),
+        .o_ibus_cyc (ibus_cyc),
+        .i_ibus_rdt (ibus_rdt),
+        .i_ibus_ack (ibus_ack),
+        
+        // D-Bus Map
+        .o_dbus_adr (dbus_adr),
+        .o_dbus_dat (dbus_dat),
+        .o_dbus_sel (dbus_sel),
+        .o_dbus_we  (dbus_we),
+        .o_dbus_cyc (dbus_cyc),
+        .i_dbus_rdt (dbus_rdt),
+        .i_dbus_ack (dbus_ack)
+    );
+
+endmodule</textarea>
+    </div>
+    
+    <div id="simPanel" class="panel hidden" style="border-color: #69db7c;">
+        <h3>5 · Live RISC-V Hardware Execution</h3>
+        
+        <div style="background:#111; padding: 12px; border-radius: 6px; margin-bottom: 15px;">
+            <label style="color:#fff; font-weight:bold; cursor:pointer;">
+                <input type="checkbox" id="traceChk" checked> 
+                🔍 Enable Verbose Hardware Analyzer (Log every clock cycle)
+            </label>
+        </div>
+
+        <div style="display:flex; gap:10px; margin-bottom: 20px;">
+            <button id="step1Btn">Step 1 Cycle</button>
+            <button id="stepBtn">Step 32 Cycles (1 Instr)</button>
+            <button id="bootBtn" class="green">▶ Auto-Clock CPU</button>
+            <button id="rstSocBtn" class="red">Hardware Reset</button>
+            <span id="cycleCount" style="margin-left:auto; font-family:monospace; color:#888; line-height: 42px;">Clock Cycles: 0</span>
+        </div>
+
+        <h4>Virtual UART Terminal (Mapped to 0x10000000)</h4>
+        <div id="uart-terminal">root@zero-soc:~# <span class="blink">_</span></div>
+    </div>
+
+    <div class="panel">
+        <div style="display:flex; justify-content: space-between; align-items:center;">
+            <h3 style="margin:0;">Console / Hardware Logic Analyzer</h3>
+            <button id="clearLogBtn" style="padding:4px 12px; font-size:0.8rem; margin:0;">Clear Log</button>
+        </div>
+        <div id="console-log" style="margin-top: 10px;">Ready. Click Synthesize to begin dynamic fetch from GitHub.</div>
+    </div>
+    
+    <div id="visuals" class="hidden">
+        <div class="schematic-container">
+            <div class="schematic-box">
+                <h3>1 · RTL view (SERV Architecture)</h3>
+                <div id="rtlSchematic"><em style="color:#888;font-size:0.85rem;">Rendering…</em></div>
+            </div>
+            <div class="schematic-box">
+                <h3>2 · Post-synth gate-level</h3>
+                <div id="synthSchematic"><em style="color:#888;font-size:0.85rem;">Rendering…</em></div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3>3 · CXXRTL C++ Simulation Model</h3>
+            <div style="display:flex;gap:8px;margin-bottom:8px;">
+                <button id="downloadCpp" style="font-size:0.8rem;padding:4px 12px;">⬇ Download sim.cpp</button>
+            </div>
+            <div id="cppPreview" class="cpp-box">/* Will appear after pipeline */</div>
+        </div>
+        
+        <div class="panel">
+            <h3>4 · Wasm Engine Status</h3>
+            <div id="wasmStatus" class="wasm-box">Waiting for synthesis...</div>
+        </div>
+    </div>
+
+<script type="module">
+    import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+    import { runClang } from 'https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js';
+    
+    const logEl = document.getElementById('console-log');
+    const cppEl = document.getElementById('cppPreview');
+    const dec = new TextDecoder();
+    let currentVerilog = '';
+    let wasmInstance = null;
+    let clockCycles = 0;
+    let runInterval = null;
+    let debugLogCount = 0;
+    
+    function log(msg, cls = '') {
+        const line = document.createElement('span');
+        if (cls) line.className = cls;
+        line.textContent = msg + '\n';
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    document.getElementById('clearLogBtn').onclick = () => { 
+        logEl.innerHTML = ''; 
+        debugLogCount = 0; // Reset limiter so you can trace again!
+    };
+    
+    function loadScript(src) {
+        return new Promise((res, rej) => {
+            if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+            const s = document.createElement('script');
+            s.src = src; s.crossOrigin = 'anonymous';
+            s.onload = res; s.onerror = () => rej(new Error('Failed to load: ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    
+    function toStr(v) { return v ? (typeof v === 'string' ? v : dec.decode(v)) : ''; }
+    
+    function fixYosysJson(json) {
+        if (!json?.modules) return json;
+        const fixVal = (v) => (typeof v === 'string' && /^[01]+$/.test(v) && v.length <= 32) ? parseInt(v, 2) : v;
+        const fixAttrs = (obj) => { if (obj) for (const k of Object.keys(obj)) obj[k] = fixVal(obj[k]); };
+        for (const mod of Object.values(json.modules)) {
+            fixAttrs(mod.attributes);
+            for (const cell of Object.values(mod.cells ?? {})) { fixAttrs(cell.attributes); fixAttrs(cell.parameters); }
+        }
+        return json;
+    }
+    
+    async function renderSchematic(containerId, netlistJson) {
+        const el = document.getElementById(containerId);
+        el.innerHTML = '<em style="color:#888;font-size:0.85rem;">Rendering massive schematic...</em>';
+        try {
+            const skin = netlistsvg.digitalSkin;
+            const svgElement = await new Promise((resolve, reject) => {
+                netlistsvg.render(skin, netlistJson, (err, result) => {
+                    if (err) return reject(err);
+                    if (!result) return reject(new Error("NetlistSVG bypassed: Design too large to route graphically."));
+                    resolve(result);
+                });
+            });
+
+            let svgString = typeof svgElement === 'string' ? svgElement : (svgElement.outerHTML || String(svgElement));
+            el.innerHTML = svgString;
+
+            await loadScript('https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js');
+            const svgDom = el.querySelector('svg');
+            if (svgDom) {
+                svgDom.removeAttribute('width');
+                svgDom.removeAttribute('height');
+                svgPanZoom(svgDom, { zoomEnabled: true, controlIconsEnabled: true, fit: true, center: true, minZoom: 0.1, maxZoom: 10 });
+            }
+        } catch (e) {
+            el.innerHTML = `<pre style="color:#f97171;font-size:0.8rem;white-space:pre-wrap;">[Render bypassed]\n${e.message}</pre>`;
+        }
+    }
+
+    async function fetchCxxrtlHeader() {
+        const cdnUrl = 'https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h';
+        log(`Fetching core silicon engine from jsDelivr CDN...`);
+        const response = await fetch(cdnUrl);
+        if (!response.ok) throw new Error(`Header Fetch failed: ${response.status} ${response.statusText}`);
+        log('Core engine fetched successfully.', 'log-ok');
+        return await response.text();
+    }
+
+    /* ── MAIN PIPELINE: FETCH SERV + SYNTHESIZE ── */
+    async function doFullPipeline() {
+        currentVerilog = document.getElementById('verilogInput').value.trim();
+        if (!currentVerilog) return log('Verilog code is empty!', 'log-err');
+        
+        logEl.textContent = '';
+        document.getElementById('visuals').classList.add('hidden');
+        document.getElementById('simPanel').classList.add('hidden');
+        document.getElementById('runBtn').disabled = true;
+        document.getElementById('clangBtn').disabled = true;
+        window.filesOutCache = null;
+        
+        try {
+            log('Loading NetlistSVG tools…');
+            await loadScript('https://cdn.jsdelivr.net/npm/elkjs/lib/elk.bundled.js');
+            await loadScript('https://cdn.jsdelivr.net/npm/netlistsvg@1.0.2/built/netlistsvg.bundle.js');
+            
+            const servFiles = [
+                'serv_aligner.v', 'serv_alu.v', 'serv_bufreg.v', 'serv_bufreg2.v',
+                'serv_compdec.v', 'serv_csr.v', 'serv_ctrl.v', 'serv_debug.v',
+                'serv_decode.v', 'serv_immdec.v', 'serv_mem_if.v', 'serv_rf_if.v',
+                'serv_rf_ram_if.v', 'serv_rf_ram.v', 'serv_rf_top.v',
+                'serv_state.v', 'serv_top.v'
+            ];
+            
+            const vfs = { 'input.v': currentVerilog };
+            log(`Fetching ${servFiles.length} files from olofk/serv GitHub repository...`);
+            
+            await Promise.all(servFiles.map(async (file) => {
+                const url = `https://cdn.jsdelivr.net/gh/olofk/serv@main/rtl/${file}`;
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`Failed to fetch ${file}`);
+                vfs[file] = await resp.text();
+            }));
+            log('SERV architecture downloaded successfully.', 'log-ok');
+
+            const readCmds = ['read_verilog -sv input.v', ...servFiles.map(f => `read_verilog -sv ${f}`)].join('; ');
+            const yosysScript = [
+                readCmds,
+                'prep -top zero_soc',
+                'write_json rtl.json',
+                'write_cxxrtl sim.cpp',
+                'synth -top zero_soc',
+                'write_json synth.json'
+            ].join('; ');
+            
+            log('Invoking Yosys to link and synthesize the RISC-V core…');
+            const filesOut = await runYosys(
+                ['-p', yosysScript], vfs,
+                { stdout: b => b && log(toStr(b).trimEnd()), stderr: b => b && log(toStr(b).trimEnd()) }
+            );
+            
+            window.filesOutCache = filesOut;
+            
+            function getJson(name) {
+                const raw = filesOut[name];
+                if (!raw) throw new Error(`Missing ${name}`);
+                return fixYosysJson(JSON.parse(toStr(raw)));
+            }
+            
+            log('Rendering schematics…', 'log-ok');
+            document.getElementById('visuals').classList.remove('hidden');
+            renderSchematic('rtlSchematic', getJson('rtl.json'));
+            renderSchematic('synthSchematic', getJson('synth.json'));
+            
+            if (filesOut['sim.cpp']) {
+                cppEl.textContent = toStr(filesOut['sim.cpp']);
+                log('CXXRTL model generated!', 'log-ok');
+                document.getElementById('downloadCpp').onclick = () => {
+                    const blob = new Blob([toStr(filesOut['sim.cpp'])], {type: 'text/plain'});
+                    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sim.cpp'; a.click();
+                };
+            }
+            document.getElementById('clangBtn').disabled = false;
+        } catch (err) {
+            log('[CRITICAL ERROR] ' + err.message, 'log-err');
+        } finally {
+            document.getElementById('runBtn').disabled = false;
+        }
+    }
+
+    /* ── WASM COMPILATION & FIRMWARE INJECTION ── */
+    async function compileToWasm() {
+        if (!window.filesOutCache?.['sim.cpp']) return;
+        document.getElementById('wasmStatus').textContent = 'Compiling RISC-V to WebAssembly engine...';
+        document.getElementById('clangBtn').disabled = true;
+        
+        try {
+            const [{ runClang }, headerContent] = await Promise.all([
+                import('https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js'),
+                fetchCxxrtlHeader()
+            ]);
+
+            const driverCpp = `\
+#include <cxxrtl/cxxrtl.h>
+
+void* operator new(size_t) { return (void*)0; }
+void* operator new[](size_t) { return (void*)0; }
+void operator delete(void*) noexcept {}
+void operator delete[](void*) noexcept {}
+void operator delete(void*, size_t) noexcept {}
+void operator delete[](void*, size_t) noexcept {}
+
+#include "sim.cpp"
+
+cxxrtl_design::p_zero__soc dut;
+
+// C++ Emulated Memory (1 Megabyte)
+uint32_t ram[256 * 1024];
+
+// Virtual UART Buffer
+char uart_buf[1024];
+int uart_ptr = 0;
+int clock_cycle = 0;
+
+extern "C" {
+    extern void js_debug_bus(int cycle, int rst,
+                             int i_cyc, uint32_t i_adr, int i_ack, uint32_t i_rdt,
+                             int d_cyc, int d_we, uint32_t d_adr, uint32_t d_dat, int d_ack, uint32_t d_rdt);
+
+    __attribute__((export_name("init"))) void init() {
+        // ── RISC-V MACHINE CODE INJECTION ──
+        ram[0] = 0x04800513; // li a0, 72 ('H')
+        ram[1] = 0x100005b7; // lui a1, 0x10000
+        ram[2] = 0x00a5a023; // sw a0, 0(a1)
+        ram[3] = 0x06900513; // li a0, 105 ('i')
+        ram[4] = 0x00a5a023; // sw a0, 0(a1)
+        ram[5] = 0x02100513; // li a0, 33 ('!')
+        ram[6] = 0x00a5a023; // sw a0, 0(a1)
+        ram[7] = 0x0000006f; // j .
+
+        dut.reset();
+    }
+
+    __attribute__((export_name("reset_cycle"))) void reset_cycle() { clock_cycle = 0; }
+
+    __attribute__((export_name("tick"))) void tick() {
+        // 1. Falling edge
+        dut.p_clk.data[0] = 0;
+        dut.step();
+
+        // 2. Sample current bus requests (combinatorial from CPU)
+        int i_cyc = dut.p_ibus__cyc.data[0];
+        uint32_t i_adr = dut.p_ibus__adr.data[0];
+        int d_cyc = dut.p_dbus__cyc.data[0];
+        int d_we  = dut.p_dbus__we.data[0];
+        uint32_t d_adr = dut.p_dbus__adr.data[0];
+        uint32_t d_dat = dut.p_dbus__dat.data[0];
+
+        // 3. Compute responses combinatorially (0-wait-state)
+        uint32_t i_rdt = 0;
+        int i_ack = 0;
+        uint32_t d_rdt = 0;
+        int d_ack = 0;
+
+        if (i_cyc) {
+            i_rdt = ram[(i_adr >> 2) & 0x3FFFF];
+            i_ack = 1;
+        }
+        if (d_cyc) {
+            if (d_we) {
+                if (d_adr == 0x10000000) {
+                    uart_buf[uart_ptr] = (char)(d_dat & 0xFF);
+                    uart_ptr = (uart_ptr + 1) & 1023;
+                } else {
+                    ram[(d_adr >> 2) & 0x3FFFF] = d_dat;
+                }
+            } else {
+                d_rdt = ram[(d_adr >> 2) & 0x3FFFF];
+            }
+            d_ack = 1;
+        }
+
+        // 4. Drive responses back into the CPU
+        dut.p_ibus__rdt.data[0] = i_rdt;
+        dut.p_ibus__ack.data[0] = i_ack;
+        dut.p_dbus__rdt.data[0] = d_rdt;
+        dut.p_dbus__ack.data[0] = d_ack;
+
+        // 5. Logic Analyzer (BEFORE rising edge — bus is still valid here)
+        js_debug_bus(clock_cycle, dut.p_rst__n.data[0],
+                     i_cyc, i_adr, i_ack, i_rdt,
+                     d_cyc, d_we, d_adr, d_dat, d_ack, d_rdt);
+
+        // 6. Rising edge — SERV latches the valid ack+rdt here
+        dut.p_clk.data[0] = 1;
+        dut.step();
+
+        // 7. Deassert ack AFTER the rising edge (clean Wishbone protocol)
+        dut.p_ibus__ack.data[0] = 0;
+        dut.p_dbus__ack.data[0] = 0;
+
+        clock_cycle++;
+    }
+
+    __attribute__((export_name("set_rst_n"))) void set_rst_n(int v) {
+        dut.p_rst__n.data[0] = v;
+        dut.step();
+        dut.step();
+    }
+
+    __attribute__((export_name("get_uart_char"))) int get_uart_char() {
+        if (uart_ptr > 0) {
+            int c = uart_buf[0];
+            for(int i=1; i<uart_ptr; i++) uart_buf[i-1] = uart_buf[i];
+            uart_ptr--;
+            return c;
+        }
+        return -1;
+    }
+}
+`;
+            const files = {
+                'driver.cpp': driverCpp,
+                'sim.cpp': toStr(window.filesOutCache['sim.cpp']),
+                'cxxrtl': { 'cxxrtl.h': headerContent }
+            };
+
+            const clangArgs = [
+                'clang++', '-std=c++17', '-O3', '-I/', '--target=wasm32',
+                '-nostdlib', '-nostdinc', '-fno-exceptions', '-ferror-limit=0', '-fno-rtti', '-Wno-new-returns-null',
+                '-Wl,--no-entry', '-Wl,--allow-undefined', 'driver.cpp', '-o', 'sim.wasm'
+            ];
+
+            let clangOut = '', clangErr = '';
+            const result = await runClang(clangArgs, files, {
+                stdout: b => {},
+                stderr: b => { if(b) { clangErr += dec.decode(b, {stream:true}); const lines = clangErr.split('\n'); clangErr = lines.pop(); for(const l of lines) log(l, 'log-warn'); } }
+            });
+
+            const wasmBin = result['sim.wasm'];
+            if (!wasmBin || wasmBin.byteLength === 0) throw new Error('No sim.wasm produced.');
+            
+            document.getElementById('wasmStatus').innerHTML = `<span class="tag-ok">Wasm simulator ready</span> · ${wasmBin.byteLength} bytes`;
+            
+            // Construct the Logic Analyzer Environment
+            function toHex(num) { return "0x" + (num >>> 0).toString(16).padStart(8, '0'); }
+            
+            const customEnv = {
+                js_debug_bus: (cycle, rst, icyc, iadr, iack, irdt, dcyc, dwe, dadr, ddat, dack, drdt) => {
+                    if (!document.getElementById('traceChk').checked) return;
+                    
+                    let out = `[CYC: ${cycle.toString().padStart(4, '0')}] RST:${rst} | `;
+                    if (icyc) out += `I-BUS: (RD) ADR=${toHex(iadr)} DAT=${toHex(irdt)} ACK=${iack} | `;
+                    else out += `I-BUS: IDLE | `;
+                    
+                    if (dcyc) {
+                        if (dwe) out += `D-BUS: (WR) ADR=${toHex(dadr)} DAT=${toHex(ddat)} ACK=${dack}`;
+                        else     out += `D-BUS: (RD) ADR=${toHex(dadr)} DAT=${toHex(drdt)} ACK=${dack}`;
+                    } else {
+                        out += `D-BUS: IDLE`;
+                    }
+                    
+                    // Color code it so it's readable
+                    if(rst === 0) log(out, 'log-err');
+                    else if(dcyc && dwe) log(out, 'log-ok'); // Highlight writes
+                    else log(out, 'log-bus');
+                }
+            };
+            const dummyEnv = new Proxy(customEnv, { get: (target, prop) => target[prop] || (() => 0) });
+            
+            const { instance } = await WebAssembly.instantiate(wasmBin, { env: dummyEnv, wbindgen_placeholder: dummyEnv });
+            wasmInstance = instance.exports;
+            
+            document.getElementById('simPanel').classList.remove('hidden');
+            
+            // Terminal Logic
+            const term = document.getElementById('uart-terminal');
+            function pollUART() {
+                if(!wasmInstance) return;
+                let c = wasmInstance.get_uart_char();
+                while(c !== -1) {
+                    term.innerHTML = term.innerHTML.replace('<span class="blink">_</span>', String.fromCharCode(c) + '<span class="blink">_</span>');
+                    term.scrollTop = term.scrollHeight;
+                    c = wasmInstance.get_uart_char();
+                }
+            }
+
+            // Proper Synchronous Reset
+          function hardReset() {
+              if (!wasmInstance) return;
+              wasmInstance.init();
+              wasmInstance.reset_cycle();
+
+              log("--- INIT HARDWARE RESET ---", "log-err");
+              wasmInstance.set_rst_n(0);
+              for(let i = 0; i < 64; i++) wasmInstance.tick(); // Was 8 — needs 64+ for SERV
+
+              wasmInstance.set_rst_n(1);
+              log("--- LIFT HARDWARE RESET ---", "log-ok");
+
+              clockCycles = 0;
+              document.getElementById('cycleCount').textContent = `Clock Cycles: 0`;
+              term.innerHTML = 'root@zero-soc:~# <span class="blink">_</span>';
+              pollUART();
+          }
+            hardReset(); // Auto-reset on compile completion
+
+            document.getElementById('step1Btn').onclick = () => {
+                wasmInstance.tick();
+                clockCycles++;
+                document.getElementById('cycleCount').textContent = `Clock Cycles: ${clockCycles}`;
+                pollUART();
+            };
+
+            document.getElementById('stepBtn').onclick = () => {
+                for(let i=0; i<32; i++) wasmInstance.tick(); 
+                clockCycles += 32;
+                document.getElementById('cycleCount').textContent = `Clock Cycles: ${clockCycles}`;
+                pollUART();
+            };
+
+            const bootBtn = document.getElementById('bootBtn');
+            bootBtn.onclick = () => {
+                if(runInterval) {
+                    clearInterval(runInterval);
+                    runInterval = null;
+                    bootBtn.textContent = '▶ Auto-Clock CPU';
+                    bootBtn.className = 'green';
+                } else {
+                    runInterval = setInterval(() => {
+                        for(let i=0; i<500; i++) wasmInstance.tick(); 
+                        clockCycles += 500;
+                        document.getElementById('cycleCount').textContent = `Clock Cycles: ${clockCycles}`;
+                        pollUART();
+                    }, 16); 
+                    bootBtn.textContent = '⏸ Pause Execution';
+                    bootBtn.className = 'red';
+                }
+            };
+
+            document.getElementById('rstSocBtn').onclick = hardReset;
+
+        } catch (err) {
+            document.getElementById('wasmStatus').textContent = '[Clang error] ' + err.message;
+            log('[Clang error] ' + err.message, 'log-err');
+        } finally {
+            document.getElementById('clangBtn').disabled = false;
+        }
+    }
+    
+    document.getElementById('runBtn').addEventListener('click', doFullPipeline);
+    document.getElementById('clangBtn').addEventListener('click', compileToWasm);
+</script>
+</body>
+</html>
