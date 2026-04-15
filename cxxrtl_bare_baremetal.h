@@ -7,6 +7,7 @@
   into finding and impelementing more workarounds for the STL. Its doable if you implement some other stuff in the reference however. Be prepared for a lot of work though!
   In the future, I will make sure to document every singular thing this baremetal implementation leaves out from the original
 */
+// IMPORTANT: IF ANYTHING ERRORS, 90% of the time, its because a valid call does not have its stub implemented here, especially some debug calls
 #ifndef BARE_CXXRTL_H
 #define BARE_CXXRTL_H
 
