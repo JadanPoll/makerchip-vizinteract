@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Beast Mode EDA: 16-Bit SoC Simulator</title>
     <style>
-        /* ... identical to original ... */
         *, *::before, *::after { box-sizing: border-box; }
         body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; margin: 0; }
         h2 { color: #f97171; margin-top: 0; font-size: 1.6rem; text-transform: uppercase; letter-spacing: 1px; }
@@ -220,10 +219,11 @@ endmodule</textarea>
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // ENHANCED BARE-METAL CXXRTL HEADER – Includes all required Yosys cells
+    // THE ULTIMATE BARE-METAL CXXRTL HEADER 
+    // Contains all Yosys stubs, perfectly pruned implementations
     // ─────────────────────────────────────────────────────────────────────
-    const BARE_METAL_CXXRTL_H = `#ifndef CXXRTL_H
-#define CXXRTL_H
+    const BARE_METAL_CXXRTL_H = `#ifndef BARE_CXXRTL_H
+#define BARE_CXXRTL_H
 
 #define CXXRTL_EXTREMELY_COLD
 #define CXXRTL_ALWAYS_INLINE inline
@@ -241,8 +241,12 @@ typedef unsigned long size_t;
 #define UINT64_C(c) c ## ULL
 #endif
 
-// --- 1. MOCK THE STL ---
+// --- MOCK THE STL FOR YOSYS STUBS ---
 namespace std {
+    template<typename T> struct remove_reference { typedef T type; };
+    template<typename T> struct remove_reference<T&> { typedef T type; };
+    template<typename T> struct remove_reference<T&&> { typedef T type; };
+
     template<class E> class initializer_list {
         const E* _M_array; size_t _M_len;
     public:
@@ -283,10 +287,7 @@ namespace std {
     template<class T> struct enable_if<true, T> { typedef T type; };
     template<typename T> struct make_unsigned { typedef uint32_t type; }; 
     template<> struct make_unsigned<int64_t> { typedef uint64_t type; };
-    template<class T1, class T2> struct pair { T1 first; T2 second; pair(T1 a, T2 b) : first(a), second(b) {} };
-    template<class T> struct remove_reference      { typedef T type; };
-    template<class T> struct remove_reference<T&>  { typedef T type; };
-    template<class T> struct remove_reference<T&&> { typedef T type; };
+    template<class T1, class T2> struct pair { T1 first; T2 second; pair(T1 a, T2 b) : first(a), second(b) {} pair() {} };
 }
 
 typedef void* cxxrtl_toplevel;
@@ -304,29 +305,25 @@ namespace cxxrtl {
     struct debug_scopes { template<typename... Args> void add(Args&&...) {} };
     struct debug_outline { debug_outline() {} template<typename T> debug_outline(T) {} };
 
-    // --- 2. EXPRESSION TEMPLATES (For slicing and concatenation) ---
     template<class T> struct expr_base;
 
-    template<size_t Bits> struct value : public expr_base<value<Bits>> {
+    // --- VALUE DEFINITION ---
+    template<size_t Bits>
+    struct value : public expr_base<value<Bits>> {
         static constexpr size_t bits = Bits;
         static constexpr size_t chunks = (Bits + 31) / 32;
-        static constexpr chunk_t msb_mask = (Bits % 32 == 0) ? ~0U : (~0U >> (32 - (Bits % 32)));
+        static constexpr chunk_t msb_mask = (Bits % 32 == 0) ? ~0u : (~0u >> (32 - Bits % 32));
+
         chunk_t data[chunks] = {};
         
         value() = default;
-        template<typename... Init>
-        constexpr value(Init ...init) : data{static_cast<chunk_t>(init)...} {}
+        template<typename... Init> constexpr value(Init ...init) : data{static_cast<chunk_t>(init)...} {}
         
-        template<size_t O> bool operator==(const value<O>& o) const {
-            size_t max_c = chunks > value<O>::chunks ? chunks : value<O>::chunks;
-            for (size_t i = 0; i < max_c; ++i) {
-                chunk_t a = (i < chunks) ? data[i] : 0;
-                chunk_t b = (i < value<O>::chunks) ? o.data[i] : 0;
-                if (a != b) return false;
-            }
+        CXXRTL_ALWAYS_INLINE bool operator==(const value& o) const {
+            for (size_t i = 0; i < chunks; ++i) if (data[i] != o.data[i]) return false;
             return true;
         }
-        template<size_t O> bool operator!=(const value<O>& o) const { return !(*this == o); }
+        CXXRTL_ALWAYS_INLINE bool operator!=(const value& o) const { return !(*this == o); }
         operator bool() const { return !is_zero(); }
         bool is_zero() const { for (size_t i = 0; i < chunks; ++i) if (data[i]) return false; return true; }
         bool is_neg() const { return data[chunks - 1] & (1u << ((Bits - 1) % 32)); }
@@ -335,237 +332,163 @@ namespace cxxrtl {
             size_t count = 0;
             for (size_t n = 0; n < chunks; n++) {
                 chunk_t x = data[chunks - 1 - n];
-                size_t msb_chunk_bits = Bits % 32 != 0 ? Bits % 32 : 32;
-                count += (n == 0 ? msb_chunk_bits : 32);
-                if (x != 0) {
-                    for (; x != 0; count--) x >>= 1;
-                    break;
-                }
+                count += (n == 0 ? (Bits % 32 ? Bits % 32 : 32) : 32);
+                if (x != 0) { for (; x != 0; count--) x >>= 1; break; }
             }
             return count;
         }
         size_t ctpop() const {
             size_t count = 0;
-            for (size_t n = 0; n < chunks; n++) {
-                for (chunk_t x = data[n]; x != 0; count++) x = x & (x - 1);
-            }
+            for (size_t n = 0; n < chunks; n++) { for (chunk_t x = data[n]; x != 0; count++) x = x & (x - 1); }
             return count;
         }
+
+        // Bitwise
+        CXXRTL_ALWAYS_INLINE value bit_not() const { value r; for(size_t i=0; i<chunks; i++) r.data[i] = ~data[i]; r.data[chunks-1] &= msb_mask; return r; }
+        CXXRTL_ALWAYS_INLINE value bit_and(const value &o) const { value r; for(size_t i=0; i<chunks; i++) r.data[i] = data[i] & o.data[i]; return r; }
+        CXXRTL_ALWAYS_INLINE value bit_or(const value &o) const { value r; for(size_t i=0; i<chunks; i++) r.data[i] = data[i] | o.data[i]; return r; }
+        CXXRTL_ALWAYS_INLINE value bit_xor(const value &o) const { value r; for(size_t i=0; i<chunks; i++) r.data[i] = data[i] ^ o.data[i]; return r; }
         
-        template<size_t NewBits> value<NewBits> trunc() const {
-            value<NewBits> result;
-            for (size_t n = 0; n < result.chunks; n++) result.data[n] = data[n];
-            result.data[result.chunks - 1] &= result.msb_mask;
-            return result;
+        // Math & Arithmetic
+        CXXRTL_ALWAYS_INLINE value add(const value &o) const {
+            value r; uint64_t c = 0;
+            for (size_t i = 0; i < chunks; i++) { uint64_t t = (uint64_t)data[i] + o.data[i] + c; r.data[i] = (uint32_t)t; c = t >> 32; }
+            r.data[chunks - 1] &= msb_mask; return r;
         }
-        template<size_t NewBits> value<NewBits> zext() const {
-            value<NewBits> result;
-            for (size_t n = 0; n < chunks; n++) result.data[n] = data[n];
-            return result;
+        CXXRTL_ALWAYS_INLINE value sub(const value &o) const {
+            value r; uint64_t c = 1;
+            for (size_t i = 0; i < chunks; i++) { uint64_t t = (uint64_t)data[i] + ~o.data[i] + c; r.data[i] = (uint32_t)t; c = t >> 32; }
+            r.data[chunks - 1] &= msb_mask; return r;
         }
-        template<size_t NewBits> value<NewBits> sext() const {
-            value<NewBits> result;
-            for (size_t n = 0; n < chunks; n++) result.data[n] = data[n];
-            if (is_neg()) {
-                result.data[chunks - 1] |= ~result.msb_mask;
-                for (size_t n = chunks; n < result.chunks; n++) result.data[n] = ~0U;
-                result.data[result.chunks - 1] &= result.msb_mask;
-            }
-            return result;
-        }
-        template<size_t NewBits> value<NewBits> rtrunc() const {
-            value<NewBits> result;
-            size_t shift_chunks = (Bits - NewBits) / 32;
-            size_t shift_bits = (Bits - NewBits) % 32;
-            chunk_t carry = 0;
-            if (shift_chunks + result.chunks < chunks) {
-                carry = (shift_bits == 0) ? 0 : data[shift_chunks + result.chunks] << (32 - shift_bits);
-            }
-            for (size_t n = result.chunks; n > 0; n--) {
-                result.data[n - 1] = carry | (data[shift_chunks + n - 1] >> shift_bits);
-                carry = (shift_bits == 0) ? 0 : data[shift_chunks + n - 1] << (32 - shift_bits);
-            }
-            return result;
-        }
-        template<size_t NewBits> value<NewBits> rzext() const {
-            value<NewBits> result;
-            size_t shift_chunks = (NewBits - Bits) / 32;
-            size_t shift_bits = (NewBits - Bits) % 32;
-            chunk_t carry = 0;
-            for (size_t n = 0; n < chunks; n++) {
-                result.data[shift_chunks + n] = (data[n] << shift_bits) | carry;
-                carry = (shift_bits == 0) ? 0 : data[n] >> (32 - shift_bits);
-            }
-            if (shift_chunks + chunks < result.chunks) result.data[shift_chunks + chunks] = carry;
-            return result;
-        }
-
-        template<size_t AmountBits, bool Signed = false> value<Bits> shr(const value<AmountBits> &amount) const {
-            for (size_t n = 1; n < amount.chunks; n++) if (amount.data[n] != 0) return (Signed && is_neg()) ? value<Bits>().bit_not() : value<Bits>();
-            size_t shift_chunks = amount.data[0] / 32;
-            size_t shift_bits = amount.data[0] % 32;
-            if (shift_chunks >= chunks) return (Signed && is_neg()) ? value<Bits>().bit_not() : value<Bits>();
-            value<Bits> result;
-            chunk_t carry = 0;
-            for (size_t n = 0; n < chunks - shift_chunks; n++) {
-                result.data[chunks - shift_chunks - 1 - n] = carry | (data[chunks - 1 - n] >> shift_bits);
-                carry = (shift_bits == 0) ? 0 : data[chunks - 1 - n] << (32 - shift_bits);
-            }
-            if (Signed && is_neg()) {
-                size_t top_idx = amount.data[0] > Bits ? 0 : (Bits - amount.data[0]) / 32;
-                size_t top_bits = amount.data[0] > Bits ? 0 : (Bits - amount.data[0]) % 32;
-                for (size_t n = top_idx + 1; n < chunks; n++) result.data[n] = ~0U;
-                if (amount.data[0] != 0) result.data[top_idx] |= ~0U << top_bits;
-                result.data[result.chunks - 1] &= result.msb_mask;
-            }
-            return result;
-        }
-        template<size_t AmountBits> value<Bits> shl(const value<AmountBits> &amount) const {
-            for (size_t n = 1; n < amount.chunks; n++) if (amount.data[n] != 0) return {};
-            size_t shift_chunks = amount.data[0] / 32;
-            size_t shift_bits = amount.data[0] % 32;
-            if (shift_chunks >= chunks) return {};
-            value<Bits> result;
-            chunk_t carry = 0;
-            for (size_t n = 0; n < chunks - shift_chunks; n++) {
-                result.data[shift_chunks + n] = (data[n] << shift_bits) | carry;
-                carry = (shift_bits == 0) ? 0 : data[n] >> (32 - shift_bits);
-            }
-            result.data[result.chunks - 1] &= result.msb_mask;
-            return result;
-        }
-
-        value<Bits> bit_not() const {
-            value<Bits> result;
-            for (size_t n = 0; n < chunks; n++) result.data[n] = ~data[n];
-            result.data[chunks - 1] &= msb_mask;
-            return result;
-        }
-        value<Bits> neg() const {
-            value<Bits> result; bool carry = true;
-            for (size_t n = 0; n < chunks; n++) {
-                uint64_t sum = (uint64_t)~data[n] + carry;
-                result.data[n] = (uint32_t)sum; carry = sum >> 32;
-            }
-            result.data[chunks - 1] &= msb_mask;
-            return result;
-        }
-        bool ucmp(const value<Bits> &other) const {
-            bool carry = true;
-            for (size_t n = 0; n < chunks; n++) {
-                uint64_t r = (uint64_t)data[n] + ~other.data[n] + carry;
-                carry = r >> 32;
-            }
-            return !carry;
-        }
-        bool scmp(const value<Bits> &other) const {
-            bool carry = true; value<Bits> result;
-            for(size_t n=0; n<chunks; n++) {
-                uint64_t r = (uint64_t)data[n] + ~other.data[n] + carry;
-                result.data[n] = (uint32_t)r; carry = r >> 32;
-            }
-            bool overflow = (is_neg() == !other.is_neg()) && (is_neg() != result.is_neg());
-            return result.is_neg() ^ overflow;
-        }
-
-        std::pair<value<Bits>, value<Bits>> udivmod(value<Bits> divisor) const {
-            value<Bits> quotient, dividend = *this;
-            if (dividend.ucmp(divisor)) return {value<Bits>{0u}, dividend};
-            int64_t divisor_shift = divisor.ctlz() - dividend.ctlz();
-            divisor = divisor.shl(value<Bits>{(chunk_t)divisor_shift});
-            for (size_t step = 0; step <= (uint64_t)divisor_shift; step++) {
-                quotient = quotient.shl(value<Bits>{1u});
-                if (!dividend.ucmp(divisor)) {
-                    value<Bits> sub_res; bool carry = true;
-                    for (size_t n = 0; n < chunks; n++) {
-                        uint64_t r = (uint64_t)dividend.data[n] + ~divisor.data[n] + carry;
-                        sub_res.data[n] = (uint32_t)r; carry = r >> 32;
-                    }
-                    sub_res.data[chunks-1] &= msb_mask;
-                    dividend = sub_res;
-                    quotient.data[0] |= 1;
+        template<size_t R> CXXRTL_ALWAYS_INLINE value<R> mul(const value &o) const {
+            value<R> r; wide_chunk_t tmp[value<R>::chunks + 1] = {};
+            for (size_t i = 0; i < chunks; i++) 
+                for (size_t j = 0; j < chunks && i + j < r.chunks; j++) {
+                    tmp[i + j] += (wide_chunk_t)data[i] * o.data[j];
+                    tmp[i + j + 1] += tmp[i + j] >> 32; tmp[i + j] &= ~0u;
                 }
-                divisor = divisor.shr(value<Bits>{1u});
-            }
-            return {quotient, dividend};
+            for (size_t i = 0; i < r.chunks; i++) r.data[i] = (uint32_t)tmp[i];
+            r.data[r.chunks - 1] &= r.msb_mask; return r;
         }
-        std::pair<value<Bits>, value<Bits>> sdivmod(const value<Bits> &other) const {
-            value<Bits + 1> quotient, remainder;
-            value<Bits + 1> dividend = sext<Bits + 1>();
-            value<Bits + 1> divisor = other.template sext<Bits + 1>();
-            if (is_neg()) dividend = dividend.neg();
-            if (other.is_neg()) divisor = divisor.neg();
-            std::pair<value<Bits+1>, value<Bits+1>> res = dividend.udivmod(divisor);
-            quotient = res.first; remainder = res.second;
-            if (is_neg() != other.is_neg()) quotient = quotient.neg();
-            if (is_neg()) remainder = remainder.neg();
-            return {quotient.template trunc<Bits>(), remainder.template trunc<Bits>()};
+        CXXRTL_ALWAYS_INLINE value neg() const { return value().sub(*this); }
+        bool ucmp(const value &o) const { bool c = true; for(size_t i=0; i<chunks; i++) { uint64_t r = (uint64_t)data[i] + ~o.data[i] + c; c = r >> 32; } return !c; }
+
+        std::pair<value, value> udivmod(value divisor) const {
+            value q, d = *this; if (d.ucmp(divisor)) return {value{0u}, d};
+            int64_t shift = divisor.ctlz() - d.ctlz(); divisor = divisor.shl(value{(chunk_t)shift});
+            for (int i = 0; i <= shift; i++) {
+                q = q.shl(value{1u}); if (!d.ucmp(divisor)) { d = d.sub(divisor); q.data[0] |= 1; }
+                divisor = divisor.shr(value{1u});
+            }
+            return {q, d};
+        }
+        std::pair<value, value> sdivmod(const value &o) const {
+            value<Bits+1> q, r, d_ext = sext<Bits+1>(), o_ext = o.template sext<Bits+1>();
+            if (is_neg()) d_ext = d_ext.neg(); if (o.is_neg()) o_ext = o_ext.neg();
+            auto res = d_ext.udivmod(o_ext); q = res.first; r = res.second;
+            if (is_neg() != o.is_neg()) q = q.neg(); if (is_neg()) r = r.neg();
+            return {q.template trunc<Bits>(), r.template trunc<Bits>()};
         }
 
-        template<size_t Stop, size_t Start> value<Bits> blit(const value<Stop - Start + 1> &source) const {
-            chunk_t start_mask = ~(~0U << (Start % 32));
-            chunk_t stop_mask = (Stop % 32 + 1 == 32) ? 0 : (~0U << (Stop % 32 + 1));
-            value<Bits> masked = *this;
-            if (Start / 32 == Stop / 32) {
-                masked.data[Start / 32] &= stop_mask | start_mask;
-            } else {
-                masked.data[Start / 32] &= start_mask;
-                for (size_t n = Start / 32 + 1; n < Stop / 32; n++) masked.data[n] = 0;
-                masked.data[Stop / 32] &= stop_mask;
+        // Extenders
+        template<size_t NewBits> CXXRTL_ALWAYS_INLINE value<NewBits> trunc() const {
+            value<NewBits> r; for (size_t i = 0; i < (r.chunks < chunks ? r.chunks : chunks); i++) r.data[i] = data[i];
+            r.data[r.chunks - 1] &= r.msb_mask; return r;
+        }
+        template<size_t NewBits> CXXRTL_ALWAYS_INLINE value<NewBits> zext() const {
+            value<NewBits> r; for (size_t i = 0; i < chunks; i++) r.data[i] = data[i]; return r;
+        }
+        template<size_t NewBits> CXXRTL_ALWAYS_INLINE value<NewBits> sext() const {
+            value<NewBits> r = zext<NewBits>();
+            if (is_neg()) { for (size_t i = chunks; i < r.chunks; i++) r.data[i] = ~0u; r.data[r.chunks-1] &= r.msb_mask; }
+            return r;
+        }
+        template<size_t NewBits> CXXRTL_ALWAYS_INLINE value<NewBits> rtrunc() const {
+            value<NewBits> r; size_t sc = (Bits - NewBits) / 32, sb = (Bits - NewBits) % 32;
+            chunk_t c = (sc + r.chunks < chunks && sb) ? data[sc + r.chunks] << (32 - sb) : 0;
+            for (size_t i = r.chunks; i > 0; i--) { r.data[i - 1] = c | (data[sc + i - 1] >> sb); c = sb ? data[sc + i - 1] << (32 - sb) : 0; }
+            return r;
+        }
+        template<size_t NewBits> CXXRTL_ALWAYS_INLINE value<NewBits> rzext() const {
+            value<NewBits> r; size_t sc = (NewBits - Bits) / 32, sb = (NewBits - Bits) % 32; chunk_t c = 0;
+            for (size_t i = 0; i < chunks; i++) { r.data[sc + i] = (data[i] << sb) | c; c = sb ? data[i] >> (32 - sb) : 0; }
+            if (sc + chunks < r.chunks) r.data[sc + chunks] = c; return r;
+        }
+
+        // Shifts
+        template<size_t A> CXXRTL_ALWAYS_INLINE value shl(const value<A> &amt) const {
+            value r; size_t s = amt.data[0], sc = s / 32, sb = s % 32; if (sc >= chunks) return r;
+            uint64_t c = 0; for (size_t i = 0; i < chunks - sc; i++) { uint64_t t = ((uint64_t)data[i] << sb) | c; r.data[i + sc] = (uint32_t)t; c = t >> 32; }
+            r.data[chunks - 1] &= msb_mask; return r;
+        }
+        template<size_t A> CXXRTL_ALWAYS_INLINE value shr(const value<A> &amt) const {
+            value r; size_t s = amt.data[0], sc = s / 32, sb = s % 32; if (sc >= chunks) return r;
+            uint64_t c = 0; for (size_t i = 0; i < chunks - sc; i++) {
+                size_t idx = chunks - 1 - i; r.data[idx - sc] = (data[idx] >> sb) | c;
+                c = sb ? (uint64_t)data[idx] << (32 - sb) : 0;
             }
-            value<Bits> shifted = source.template rzext<Stop + 1>().template zext<Bits>();
-            for(size_t i=0; i<chunks; i++) masked.data[i] |= shifted.data[i];
-            return masked;
+            return r;
+        }
+        template<size_t A> CXXRTL_ALWAYS_INLINE value sshr(const value<A> &amt) const {
+            value r = shr(amt); if (!is_neg()) return r;
+            size_t s = amt.data[0]; if (s >= Bits) s = Bits;
+            for (size_t i = Bits - s; i < Bits; i++) r.data[i / 32] |= (1u << (i % 32));
+            return r;
+        }
+
+        // The Corrected Blit
+        template<size_t Stop, size_t Start>
+        CXXRTL_ALWAYS_INLINE value blit(const value<Stop-Start+1>& src) const {
+            value r = *this;
+            constexpr size_t W = Stop - Start + 1;
+            size_t sc = Start / 32, sb = Start % 32;
+            size_t affected = (W + sb + 31) / 32;
+
+            for (size_t i = 0; i < affected; i++) {
+                size_t idx = sc + i; if (idx >= chunks) break;
+                uint32_t mask = 0u;
+                if (i == 0) mask |= ~(~0u << sb);
+                if (i == affected - 1) {
+                    size_t end_bits = (sb + W) % 32;
+                    if (end_bits != 0) mask |= (~0u << end_bits);
+                }
+                r.data[idx] &= mask;
+            }
+            for (size_t i = 0; i < src.chunks; i++) {
+                uint64_t t = (uint64_t)src.data[i] << sb;
+                if (sc + i < chunks) r.data[sc + i] |= (uint32_t)t;
+                if (sc + i + 1 < chunks) r.data[sc + i + 1] |= (uint32_t)(t >> 32);
+            }
+            return r;
         }
 
         template<size_t Count> value<Bits * Count> repeat() const {
-            static_assert(Bits == 1, "repeat() only valid for 1-bit values");
-            return *this ? value<Bits * Count>().bit_not() : value<Bits * Count>();
+            value<Bits * Count> r; if (!is_zero()) { for(size_t i=0; i<r.chunks; i++) r.data[i] = ~0U; r.data[r.chunks-1] &= r.msb_mask; }
+            return r;
         }
-        const value<Bits>& val() const { return *this; }
+        
+        const value& val() const { return *this; }
         template<class T> T get() const { return static_cast<T>(data[0]); }
     };
 
-    // Expression templates with reference stripping
-    template<class T, size_t Stop, size_t Start>
-    struct slice_expr : public expr_base<slice_expr<T, Stop, Start>> {
-        static constexpr size_t bits = Stop - Start + 1;
-        T &expr;
-        slice_expr(T &expr) : expr(expr) {}
-        operator value<bits>() const {
-            return static_cast<const value<T::bits> &>(expr).template rtrunc<T::bits - Start>().template trunc<bits>();
-        }
-        slice_expr<T, Stop, Start> &operator=(const value<bits> &rhs) {
-            expr = static_cast<const value<T::bits> &>(expr).template blit<Stop, Start>(rhs);
-            return *this;
-        }
-        const value<bits> val() const { return static_cast<const value<bits> &>(*this); }
+    // --- EXPRESSION TEMPLATES ---
+    template<class T, size_t Stop, size_t Start> struct slice_expr : public expr_base<slice_expr<T, Stop, Start>> {
+        static constexpr size_t bits = Stop - Start + 1; T &expr; slice_expr(T &e) : expr(e) {}
+        typedef typename std::remove_reference<T>::type T_base;
+        operator value<bits>() const { return static_cast<const value<T_base::bits>&>(expr).template rtrunc<T_base::bits-Start>().template trunc<bits>(); }
+        slice_expr& operator=(const value<bits>& rhs) { expr = static_cast<const value<T_base::bits>&>(expr).template blit<Stop, Start>(rhs); return *this; }
+        value<bits> val() const { return operator value<bits>(); }
     };
-
-    template<class T, class U>
-    struct concat_expr : public expr_base<concat_expr<T, U>> {
-        using TR = typename std::remove_reference<T>::type;
-        using UR = typename std::remove_reference<U>::type;
-        static constexpr size_t bits = TR::bits + UR::bits;
-        T &ms_expr; U &ls_expr;
-        concat_expr(T &ms_expr, U &ls_expr) : ms_expr(ms_expr), ls_expr(ls_expr) {}
+    template<class T, class U> struct concat_expr : public expr_base<concat_expr<T, U>> {
+        typedef typename std::remove_reference<T>::type T_base; typedef typename std::remove_reference<U>::type U_base;
+        static constexpr size_t bits = T_base::bits + U_base::bits; T &ms; U &ls; concat_expr(T &m, U &l) : ms(m), ls(l) {}
         operator value<bits>() const {
-            value<bits> ms_shifted = static_cast<const value<TR::bits> &>(ms_expr).template rzext<bits>();
-            value<bits> ls_extended = static_cast<const value<UR::bits> &>(ls_expr).template zext<bits>();
-            value<bits> result;
-            for(size_t i=0; i<value<bits>::chunks; ++i) result.data[i] = ms_shifted.data[i] | ls_extended.data[i];
-            return result;
+            value<bits> m_s = static_cast<const value<T_base::bits>&>(ms).template rzext<bits>(), l_e = static_cast<const value<U_base::bits>&>(ls).template zext<bits>(), r;
+            for(size_t i=0; i<value<bits>::chunks; i++) r.data[i] = m_s.data[i] | l_e.data[i]; return r;
         }
-        concat_expr<T, U> &operator=(const value<bits> &rhs) {
-            ms_expr = rhs.template rtrunc<TR::bits>();
-            ls_expr = rhs.template trunc<UR::bits>();
-            return *this;
-        }
-        const value<bits> val() const { return static_cast<const value<bits> &>(*this); }
+        value<bits> val() const { return operator value<bits>(); }
     };
-
-    template<class T>
-    struct expr_base {
+    template<class T> struct expr_base {
         template<size_t Stop, size_t Start = Stop> slice_expr<const T, Stop, Start> slice() const { return {*static_cast<const T *>(this)}; }
         template<size_t Stop, size_t Start = Stop> slice_expr<T, Stop, Start> slice() { return {*static_cast<T *>(this)}; }
         template<class U> concat_expr<const T, const U> concat(const U &other) const { return {*static_cast<const T *>(this), other}; }
@@ -573,133 +496,75 @@ namespace cxxrtl {
     };
 
     template<size_t Bits> struct wire {
-        value<Bits> curr, next;
-        wire() = default;
-        constexpr wire(const value<Bits>& v) : curr(v), next(v) {}
-        template<class T> void set(T v) { next.data[0] = v; }
-        template<class Observer> bool commit(Observer&) {
-            if (curr != next) { curr = next; return true; } return false;
-        }
-        bool commit() {
-            if (curr != next) { curr = next; return true; } return false;
+        value<Bits> curr, next; wire() = default; constexpr wire(const value<Bits>& v) : curr(v), next(v) {}
+        template<class Obs> bool commit(Obs&) { if (curr != next) { curr = next; return true; } return false; }
+        bool commit() { if (curr != next) { curr = next; return true; } return false; }
+    };
+
+    // Static memory fallback to avoid heap. Fixes the destructive mask bug.
+    template<size_t Width> struct memory { 
+        size_t depth; 
+        value<Width> data[1024]; 
+        struct write { size_t i; value<Width> v, m; } q[16]; size_t qn = 0;
+        explicit memory(size_t d) : depth(d) {}
+        value<Width> &operator[](size_t i) { return data[i]; }
+        const value<Width> &operator[](size_t i) const { return data[i]; }
+        void update(size_t i, value<Width> v, value<Width> m, int priority=0) { if(qn < 16) q[qn++] = {i, v, m}; }
+        template<class Obs> bool commit(Obs&) { 
+            bool ch = false; for(size_t k=0; k<qn; k++) { 
+                value<Width> n = data[q[k].i].bit_and(q[k].m.bit_not()).bit_or(q[k].v.bit_and(q[k].m)); 
+                if(data[q[k].i] != n) ch = true; data[q[k].i] = n; 
+            } 
+            qn = 0; return ch; 
         }
     };
 
     struct performer { virtual ~performer() {} };
     struct observer  { virtual ~observer() {} };
 
+    // Fixed the step() loop to properly process combinational evaluation failures
     struct module {
-        virtual ~module() {}
-        virtual void reset() = 0;
-        virtual bool eval(performer* = nullptr) = 0;
-        virtual bool commit() = 0;
-        size_t step(performer* p = nullptr) {
-            size_t deltas = 0;
-            do { deltas++; } while (eval(p) && commit());
-            return deltas;
+        virtual ~module() {} virtual void reset() = 0; virtual bool eval(performer* = nullptr) = 0; virtual bool commit() = 0;
+        size_t step(performer* p = nullptr) { 
+            size_t deltas = 0; bool converged = false;
+            do { converged = eval(p); deltas++; } while (commit() && !converged); 
+            return deltas; 
         }
         virtual void debug_info(debug_items*, debug_scopes*, std::string, metadata_map&& = {}) {}
     };
 } // cxxrtl
 
-using cxxrtl::metadata_map;
-using cxxrtl::debug_items;
-using cxxrtl::debug_scopes;
-using cxxrtl::debug_item;
-using cxxrtl::debug_outline;
-
-// ─────────────────────────────────────────────────────────────────────
-// Yosys internal cell implementations – complete set for the SoC
-// ─────────────────────────────────────────────────────────────────────
 namespace cxxrtl_yosys {
     using namespace cxxrtl;
-
-    // Logic / reductions
-    template<size_t Y, size_t A> value<Y> logic_not(const value<A> &a) { return value<Y>{ a.is_zero() ? 1u : 0u }; }
-    template<size_t Y, size_t A, size_t B> value<Y> logic_or(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() || !b.is_zero()) ? 1u : 0u }; }
-    template<size_t Y, size_t A, size_t B> value<Y> logic_and(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() && !b.is_zero()) ? 1u : 0u }; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> logic_not(const value<A> &a) { return value<Y>{ a.is_zero() ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> logic_or(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() || !b.is_zero()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> logic_and(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() && !b.is_zero()) ? 1u : 0u }; }
     
-    template<size_t Y, size_t A> value<Y> reduce_bool(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
-    template<size_t Y, size_t A> value<Y> reduce_and(const value<A> &a) { return value<Y>{ a.bit_not().is_zero() ? 1u : 0u }; }
-    template<size_t Y, size_t A> value<Y> reduce_or(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
-    template<size_t Y, size_t A> value<Y> reduce_xor(const value<A> &a) { return value<Y>{ (a.ctpop() % 2) ? 1u : 0u }; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_bool(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_and(const value<A> &a) { return value<Y>{ a.bit_not().is_zero() ? 1u : 0u }; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_or(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_xor(const value<A> &a) { return value<Y>{ (a.ctpop() % 2) ? 1u : 0u }; }
     
-    // Bitwise
-    template<size_t Y, size_t A> value<Y> not_u(const value<A> &a) { return a.template zext<Y>().bit_not(); }
-    template<size_t Y, size_t A> value<Y> not_s(const value<A> &a) { return a.template sext<Y>().bit_not(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_u(const value<A> &a) { return a.template zext<Y>().bit_not(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_s(const value<A> &a) { return a.template sext<Y>().bit_not(); }
 
-    // Unsigned add
-    template<size_t Y, size_t A, size_t B> value<Y> add_uu(const value<A>& a, const value<B>& b) {
-        value<Y> r{}; uint64_t carry = 0;
-        value<Y> a_ext = a.template zext<Y>();
-        value<Y> b_ext = b.template zext<Y>();
-        for (size_t i = 0; i < value<Y>::chunks; ++i) {
-            uint64_t sum = (uint64_t)a_ext.data[i] + b_ext.data[i] + carry;
-            r.data[i] = sum; carry = sum >> 32;
-        }
-        if constexpr (Y % 32 != 0) { r.data[value<Y>::chunks - 1] &= (1u << (Y % 32)) - 1; }
-        return r;
-    }
-    // Signed add
-    template<size_t Y, size_t A, size_t B> value<Y> add_ss(const value<A>& a, const value<B>& b) {
-        return add_uu<Y>(a.template sext<Y>(), b.template sext<Y>());
-    }
-
-    // Equality
-    template<size_t Y, size_t A, size_t B> value<Y> eq_uu(const value<A>& a, const value<B>& b) { 
-        return value<Y>{a.template zext<Y>() == b.template zext<Y>() ? 1u : 0u}; 
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> eq_ss(const value<A>& a, const value<B>& b) { 
-        return value<Y>{a.template sext<Y>() == b.template sext<Y>() ? 1u : 0u}; 
-    }
-
-    // Signed greater-than
-    template<size_t Y, size_t A, size_t B> value<Y> gt_ss(const value<A>& a, const value<B>& b) {
-        constexpr size_t BitsExt = A > B ? A : B;
-        return value<Y>{ b.template sext<BitsExt>().scmp(a.template sext<BitsExt>()) ? 1u : 0u };
-    }
-
-    // Multiplication
-    template<size_t Y, size_t A, size_t B> value<Y> mul_uu(const value<A>& a, const value<B>& b) {
-        constexpr size_t BitsM = A > B ? A : B;
-        return a.template zext<BitsM>().template mul<Y>(b.template zext<BitsM>());
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> mul_ss(const value<A>& a, const value<B>& b) {
-        constexpr size_t BitsM = A > B ? A : B;
-        return a.template sext<BitsM>().template mul<Y>(b.template sext<BitsM>());
-    }
-
-    // Division
-    template<size_t Y, size_t A, size_t B> value<Y> div_uu(const value<A>& a, const value<B>& b) {
-        constexpr size_t Bits = A > B ? A : B;
-        return a.template zext<Bits>().udivmod(b.template zext<Bits>()).first.template trunc<Y>();
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> div_ss(const value<A>& a, const value<B>& b) {
-        constexpr size_t Bits = A > B ? A : B;
-        value<Bits> dividend = a.template sext<Bits>();
-        value<Bits> divisor = b.template sext<Bits>();
-        return dividend.sdivmod(divisor).first.template trunc<Y>();
-    }
-
-    // Shifts
-    template<size_t Y, size_t A, size_t B> value<Y> shl_uu(const value<A>& a, const value<B>& b) {
-        return a.template zext<Y>().shl(b);
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> shl_su(const value<A>& a, const value<B>& b) {
-        return a.template sext<Y>().shl(b);
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> sshl_su(const value<A>& a, const value<B>& b) {
-        return shl_su<Y>(a, b);
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> shr_uu(const value<A>& a, const value<B>& b) {
-        return a.template zext<Y>().shr(b);
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> shr_su(const value<A>& a, const value<B>& b) {
-        return a.template sext<Y>().shr(b);
-    }
-    template<size_t Y, size_t A, size_t B> value<Y> sshr_su(const value<A>& a, const value<B>& b) {
-        return a.template sext<Y>().template shr<B, true>(b);
-    }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().add(b.template zext<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().add(b.template sext<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().sub(b.template zext<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().sub(b.template sext<Y>()); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_uu(const value<A>& a, const value<B>& b) { size_t Ext = A > B ? A : B; return a.template zext<Ext>().template mul<Y>(b.template zext<Ext>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().template mul<Y>(b.template sext<Y>()); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> div_ss(const value<A>& a, const value<B>& b) { return a.sdivmod(b).first.template trunc<Y>(); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shl_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().shl(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshl_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().shl(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshr_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().sshr(b); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{a.template zext<Ext>() == b.template zext<Ext>() ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{a.template sext<Ext>() == b.template sext<Ext>() ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> gt_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{b.template sext<Ext>().ucmp(a.template sext<Ext>()) ? 1u : 0u}; }
 }
 #define assert(x)
 #endif`;
@@ -779,8 +644,9 @@ namespace cxxrtl_yosys {
             const driverCpp = `\
 #include <cxxrtl/cxxrtl.h>
 
-void* operator new(size_t) { return (void*)0; }
-void* operator new[](size_t) { return (void*)0; }
+char dummy_heap[1024];
+void* operator new(size_t) { return dummy_heap; }
+void* operator new[](size_t) { return dummy_heap; }
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
@@ -799,21 +665,19 @@ extern "C" {
     __attribute__((export_name("set_rst_n"))) void set_rst_n(int v) { dut.p_rst__n.data[0] = (uint32_t)v; dut.step(); }
     __attribute__((export_name("set_op"))) void set_op(int v) { dut.p_op.data[0] = (uint32_t)(v & 0xF); dut.step(); }
     __attribute__((export_name("set_a"))) void set_a(int v) { 
-        uint16_t val = (uint16_t)(v & 0xFFFF);
-        dut.p_in__a.next.data[0] = (uint32_t)val; 
+        dut.p_in__a.data[0] = (uint32_t)(v & 0xFFFF); 
         dut.step(); 
     }
     __attribute__((export_name("set_b"))) void set_b(int v) { 
-        uint16_t val = (uint16_t)(v & 0xFFFF);
-        dut.p_in__b.next.data[0] = (uint32_t)val; 
+        dut.p_in__b.data[0] = (uint32_t)(v & 0xFFFF); 
         dut.step(); 
     }
     
-    __attribute__((export_name("get_out_res"))) int32_t get_out_res() { 
-        return dut.p_out__res.curr.template get<int32_t>(); 
+    __attribute__((export_name("get_out_res"))) int get_out_res() { 
+        return (int)dut.p_out__res.curr.data[0]; 
     }
-    __attribute__((export_name("get_out_mem"))) uint16_t get_out_mem() { 
-        return dut.p_out__mem.curr.template get<uint16_t>(); 
+    __attribute__((export_name("get_out_mem"))) int get_out_mem() { 
+        return (int)(dut.p_out__mem.curr.data[0] & 0xFFFF); 
     }
 }
 `;
