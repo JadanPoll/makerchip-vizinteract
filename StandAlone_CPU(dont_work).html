@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Beast Mode EDA: 16-Bit SoC Simulator</title>
+    <style>
+        /* ... identical to original ... */
+        *, *::before, *::after { box-sizing: border-box; }
+        body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; margin: 0; }
+        h2 { color: #f97171; margin-top: 0; font-size: 1.6rem; text-transform: uppercase; letter-spacing: 1px; }
+        h3 { color: #9cdcfe; margin: 0 0 10px; font-size: 1.05rem; }
+        p { margin: 0 0 10px; line-height: 1.5; color: #b0b8c8; font-size: 0.9rem; }
+        button { padding: 11px 22px; font-size: 1rem; background: #1565c0; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; margin-right: 10px; margin-bottom: 8px; transition: background 0.15s; }
+        button:hover:not(:disabled) { background: #1e88e5; }
+        button:disabled { opacity: 0.45; cursor: not-allowed; }
+        button.green { background: #2e7d32; }
+        button.green:hover:not(:disabled) { background: #388e3c; }
+        button.red { background: #c62828; }
+        button.red:hover:not(:disabled) { background: #e53935; }
+        .panel { background: #1e2030; border: 1px solid #2a3050; padding: 15px; border-radius: 8px; margin-bottom: 20px; }
+        #console-log { height: 260px; overflow-y: auto; color: #9cdcfe; white-space: pre-wrap; font-family: monospace; font-size: 0.82rem; border: 1px solid #2a3050; background: #0d0f1a; padding: 10px; border-radius: 6px; line-height: 1.5; }
+        .log-err { color: #f97171; }
+        .log-ok { color: #69db7c; }
+        .log-warn { color: #ffd43b; }
+        .schematic-container { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+        .schematic-box { flex: 1; min-width: min(100%, 480px); background: #fff; padding: 14px; border-radius: 8px; overflow: auto; min-height: 400px; border: 2px solid #1565c0; }
+        .schematic-box h3 { color: #1a237e; font-size: 0.85rem; margin-bottom: 8px; }
+        .schematic-box svg { max-width: 100%; height: auto; display: block; margin: auto; }
+        .cpp-box { background: #0d0f1a; color: #ce9178; padding: 12px; border-radius: 8px; border: 1px solid #3a2a1a; height: 380px; overflow: auto; font-family: monospace; white-space: pre; font-size: 0.8rem; line-height: 1.45; }
+        .wasm-box { background: #0d0f1a; color: #f97171; padding: 12px; border-radius: 8px; border: 1px solid #2a3050; min-height: 80px; font-family: monospace; white-space: pre-wrap; font-size: 0.85rem; }
+        .tag-ok { background: #1b4332; color: #69db7c; padding: 3px 8px; border-radius: 4px; font-size: 0.8rem; }
+        textarea { width: 100%; height: 420px; font-family: monospace; font-size: 0.85rem; background: #0d0f1a; color: #ce9178; border: 1px solid #3a2a1a; border-radius: 6px; padding: 12px; resize: vertical; line-height: 1.45; }
+        .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+        .value-display { font-size: 1.5rem; font-weight: bold; font-family: monospace; background: #111; padding: 8px 16px; border-radius: 6px; min-width: 120px; text-align: center; color: #69db7c;}
+        .hidden { display: none; }
+        .control-group { display: flex; flex-direction: column; gap: 4px; }
+        .control-group label { font-size: 0.8rem; color: #888; text-transform: uppercase; font-weight: bold; }
+        .control-group input, .control-group select { background: #111; color: #fff; border: 1px solid #333; padding: 8px; border-radius: 4px; font-family: monospace; font-size: 1rem; width: 120px; }
+    </style>
+</head>
+<body>
+    <h2>🔥 Beast Mode: 16-Bit RISC ALU + RAM</h2>
+    <p>Synthesizing signed division, RAM arrays, vector concatenation, and dynamic bit-shifts into Bare-Metal Wasm.</p>
+    <div style="margin-bottom: 16px;">
+        <button id="runBtn" class="red">▶ Synthesize RTL Pipeline</button>
+        <button id="clangBtn" class="green" disabled>⚙ Compile Bare-Metal Wasm</button>
+    </div>
+    
+    <div class="panel">
+        <h3>SystemVerilog: 16-Bit System-on-Chip</h3>
+        <textarea id="verilogInput" spellcheck="false">module beast_soc (
+    input logic clk,
+    input logic rst_n,
+    input logic [3:0] op,
+    input logic signed [15:0] in_a,
+    input logic signed [15:0] in_b,
+    output logic signed [31:0] out_res,
+    output logic [15:0] out_mem
+);
+    // Complex RAM array mapping
+    logic [15:0] ram [0:15];
+
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            out_res <= 0;
+            out_mem <= 0;
+            for (int i = 0; i < 16; i++) ram[i] <= 16'h0000;
+        end else begin
+            // Memory Subsystem
+            if (op == 4'h9) ram[in_a[3:0]] <= in_b;
+            out_mem <= ram[in_b[3:0]];
+
+            // Massive ALU mapping
+            case (op)
+                4'h0: out_res <= in_a + in_b;                     // Add
+                4'h1: out_res <= in_a * in_b;                     // Mul (Wide)
+                4'h2: out_res <= in_a <<< in_b[3:0];              // Shift Left
+                4'h3: out_res <= in_a >>> in_b[3:0];              // Shift Right (Signed)
+                4'h4: out_res <= {in_a[15:8], in_b[7:0]};         // Concat & Slice
+                4'h5: out_res <= (in_a > in_b) ? 32'd1 : 32'd0;   // Signed Compare
+                4'h6: out_res <= {31'd0, &in_a};                  // Reduction AND
+                4'h7: out_res <= {31'd0, ^in_b};                  // Reduction XOR
+                4'h8: out_res <= $signed(in_a) / $signed(in_b != 0 ? in_b : 16'd1); // Signed Div
+                default: out_res <= ~in_a;                        // Bitwise NOT
+            endcase
+        end
+    end
+endmodule</textarea>
+    </div>
+    
+    <div class="panel">
+        <h3>Console / Yosys Log</h3>
+        <div id="console-log">Ready. Brace your browser.</div>
+    </div>
+    
+    <div id="visuals" class="hidden">
+        <div class="schematic-container">
+            <div class="schematic-box">
+                <h3>1 · RTL view (Memory + Multipliers + Div)</h3>
+                <div id="rtlSchematic"><em style="color:#888;font-size:0.85rem;">Rendering…</em></div>
+            </div>
+            <div class="schematic-box">
+                <h3>2 · Post-synth gate-level</h3>
+                <div id="synthSchematic"><em style="color:#888;font-size:0.85rem;">Rendering…</em></div>
+            </div>
+        </div>
+        
+        <div class="panel">
+            <h3>3 · CXXRTL simulation model (sim.cpp)</h3>
+            <div style="display:flex;gap:8px;margin-bottom:8px;">
+                <button id="downloadCpp" style="font-size:0.8rem;padding:4px 12px;">⬇ Download sim.cpp</button>
+            </div>
+            <div id="cppPreview" class="cpp-box">/* Will appear after pipeline */</div>
+        </div>
+        
+        <div class="panel">
+            <h3>4 · Wasm compilation status</h3>
+            <div id="wasmStatus" class="wasm-box">Waiting for synthesis...</div>
+            <div id="wasmDemo"></div>
+        </div>
+        
+        <div id="simPanel" class="panel hidden">
+            <h3>5 · Live Hardware Simulation: 16-Bit RISC ALU</h3>
+            <div class="controls">
+                <div class="control-group">
+                    <label>Operation (op)</label>
+                    <select id="uiOp">
+                        <option value="0">0: A + B</option>
+                        <option value="1">1: A * B</option>
+                        <option value="2">2: A &lt;&lt;&lt; B[3:0]</option>
+                        <option value="3">3: A &gt;&gt;&gt; B[3:0]</option>
+                        <option value="4">4: {A[15:8], B[7:0]}</option>
+                        <option value="5">5: A &gt; B</option>
+                        <option value="6">6: &amp;A (Reduc AND)</option>
+                        <option value="7">7: ^B (Reduc XOR)</option>
+                        <option value="8">8: A / B (Signed Div)</option>
+                        <option value="9">9: RAM[A] = B</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Input A (int16)</label>
+                    <input type="number" id="uiA" value="500">
+                </div>
+                <div class="control-group">
+                    <label>Input B (int16)</label>
+                    <input type="number" id="uiB" value="10">
+                </div>
+                
+                <button id="tickBtn" class="green" style="margin-bottom:0; height: 42px;">⏱ Tick Clock</button>
+                <button id="rstBtn" class="red" style="margin-bottom:0; height: 42px;">Reset</button>
+
+                <div style="margin-left:auto; display:flex; gap:20px;">
+                    <div class="control-group">
+                        <label>ALU Out (int32)</label>
+                        <div id="outRes" class="value-display">0</div>
+                    </div>
+                    <div class="control-group">
+                        <label>RAM Read[B] Out</label>
+                        <div id="outMem" class="value-display" style="color:#7eb8f7;">0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script type="module">
+    import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+    
+    const logEl = document.getElementById('console-log');
+    const cppEl = document.getElementById('cppPreview');
+    const dec = new TextDecoder();
+    let currentVerilog = '';
+    let wasmInstance = null;
+    
+    function log(msg, cls = '') {
+        const line = document.createElement('span');
+        if (cls) line.className = cls;
+        line.textContent = msg + '\n';
+        logEl.appendChild(line);
+        logEl.scrollTop = logEl.scrollHeight;
+    }
+    
+    function loadScript(src) {
+        return new Promise((res, rej) => {
+            if (document.querySelector(`script[src="${src}"]`)) { res(); return; }
+            const s = document.createElement('script');
+            s.src = src; s.crossOrigin = 'anonymous';
+            s.onload = res; s.onerror = () => rej(new Error('Failed to load: ' + src));
+            document.head.appendChild(s);
+        });
+    }
+    
+    function toStr(v) { return v ? (typeof v === 'string' ? v : dec.decode(v)) : ''; }
+    
+    function fixYosysJson(json) {
+        if (!json?.modules) return json;
+        const fixVal = (v) => (typeof v === 'string' && /^[01]+$/.test(v) && v.length <= 32) ? parseInt(v, 2) : v;
+        const fixAttrs = (obj) => { if (obj) for (const k of Object.keys(obj)) obj[k] = fixVal(obj[k]); };
+        for (const mod of Object.values(json.modules)) {
+            fixAttrs(mod.attributes);
+            for (const cell of Object.values(mod.cells ?? {})) { fixAttrs(cell.attributes); fixAttrs(cell.parameters); }
+        }
+        return json;
+    }
+    
+    async function renderSchematic(containerId, netlistJson) {
+        const el = document.getElementById(containerId);
+        el.innerHTML = '<em style="color:#888;font-size:0.85rem;">Rendering massive schematic...</em>';
+        try {
+            const skin = netlistsvg.digitalSkin;
+            const svg = await new Promise((resolve, reject) => {
+                netlistsvg.render(skin, netlistJson, (err, result) => err ? reject(err) : resolve(result));
+            });
+            el.innerHTML = typeof svg === 'string' ? svg : svg.outerHTML || String(svg);
+            log(`Schematic rendered: ${containerId}`, 'log-ok');
+        } catch (e) {
+            el.innerHTML = `<pre style="color:#f97171;font-size:0.8rem;">[Render error] ${e.message}</pre>`;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ENHANCED BARE-METAL CXXRTL HEADER – Includes all required Yosys cells
+    // ─────────────────────────────────────────────────────────────────────
+    const BARE_METAL_CXXRTL_H = `#ifndef CXXRTL_H
+#define CXXRTL_H
+
+#define CXXRTL_EXTREMELY_COLD
+#define CXXRTL_ALWAYS_INLINE inline
+
+typedef unsigned int uint32_t;
+typedef unsigned long long uint64_t;
+typedef int int32_t;
+typedef long long int64_t;
+typedef unsigned long size_t;
+
+#ifndef UINT32_C
+#define UINT32_C(c) c ## U
+#endif
+#ifndef UINT64_C
+#define UINT64_C(c) c ## ULL
+#endif
+
+// --- 1. MOCK THE STL ---
+namespace std {
+    template<class E> class initializer_list {
+        const E* _M_array; size_t _M_len;
+    public:
+        constexpr initializer_list(const E* a, size_t l) : _M_array(a), _M_len(l) {}
+        constexpr initializer_list() : _M_array(nullptr), _M_len(0) {}
+        constexpr size_t size() const { return _M_len; }
+        constexpr const E* begin() const { return _M_array; }
+        constexpr const E* end() const { return _M_array + _M_len; }
+    };
+    template<typename T> struct unique_ptr {
+        T* p;
+        unique_ptr() : p(nullptr) {}
+        unique_ptr(T* ptr) : p(ptr) {}
+        ~unique_ptr() { delete p; }
+        T* operator->() const { return p; }
+        T& operator*() const { return *p; }
+        void reset(T* ptr) { delete p; p = ptr; }
+        unique_ptr(unique_ptr&& o) : p(o.p) { o.p = nullptr; }
+        unique_ptr& operator=(unique_ptr&& o) { delete p; p = o.p; o.p = nullptr; return *this; }
+    };
+    template<typename T> struct unique_ptr<T[]> {
+        T* p;
+        unique_ptr() : p(nullptr) {}
+        unique_ptr(T* ptr) : p(ptr) {}
+        ~unique_ptr() { delete[] p; }
+        T& operator[](size_t i) const { return p[i]; }
+        unique_ptr(unique_ptr&& o) : p(o.p) { o.p = nullptr; }
+        unique_ptr& operator=(unique_ptr&& o) { delete[] p; p = o.p; o.p = nullptr; return *this; }
+    };
+    struct string {
+        string() {} string(const char*) {}
+        bool empty() const { return true; } size_t size() const { return 0; }
+        string substr(size_t, size_t) const { return *this; } char operator[](size_t) const { return 0; }
+    };
+    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
+    template<typename... Args> int bind(Args&&...) { return 0; }
+    template<bool B, class T = void> struct enable_if {};
+    template<class T> struct enable_if<true, T> { typedef T type; };
+    template<typename T> struct make_unsigned { typedef uint32_t type; }; 
+    template<> struct make_unsigned<int64_t> { typedef uint64_t type; };
+    template<class T1, class T2> struct pair { T1 first; T2 second; pair(T1 a, T2 b) : first(a), second(b) {} };
+    template<class T> struct remove_reference      { typedef T type; };
+    template<class T> struct remove_reference<T&>  { typedef T type; };
+    template<class T> struct remove_reference<T&&> { typedef T type; };
+}
+
+typedef void* cxxrtl_toplevel;
+struct _cxxrtl_toplevel { template<typename T> _cxxrtl_toplevel(T) {} };
+
+namespace cxxrtl {
+    using chunk_t = uint32_t;
+    using wide_chunk_t = uint64_t;
+    struct interior {};
+
+    struct metadata_pair { template<typename K, typename V> metadata_pair(K, V) {} };
+    struct metadata_map { metadata_map() {} metadata_map(std::initializer_list<metadata_pair>) {} };
+    struct debug_item { enum { INPUT=1, OUTPUT=2, INOUT=3, UNDRIVEN=4, DRIVEN_SYNC=8, DRIVEN_COMB=16, GENERATED=32 }; };
+    struct debug_items { template<typename... Args> void add(Args&&...) {} };
+    struct debug_scopes { template<typename... Args> void add(Args&&...) {} };
+    struct debug_outline { debug_outline() {} template<typename T> debug_outline(T) {} };
+
+    // --- 2. EXPRESSION TEMPLATES (For slicing and concatenation) ---
+    template<class T> struct expr_base;
+
+    template<size_t Bits> struct value : public expr_base<value<Bits>> {
+        static constexpr size_t bits = Bits;
+        static constexpr size_t chunks = (Bits + 31) / 32;
+        static constexpr chunk_t msb_mask = (Bits % 32 == 0) ? ~0U : (~0U >> (32 - (Bits % 32)));
+        chunk_t data[chunks] = {};
+        
+        value() = default;
+        template<typename... Init>
+        constexpr value(Init ...init) : data{static_cast<chunk_t>(init)...} {}
+        
+        template<size_t O> bool operator==(const value<O>& o) const {
+            size_t max_c = chunks > value<O>::chunks ? chunks : value<O>::chunks;
+            for (size_t i = 0; i < max_c; ++i) {
+                chunk_t a = (i < chunks) ? data[i] : 0;
+                chunk_t b = (i < value<O>::chunks) ? o.data[i] : 0;
+                if (a != b) return false;
+            }
+            return true;
+        }
+        template<size_t O> bool operator!=(const value<O>& o) const { return !(*this == o); }
+        operator bool() const { return !is_zero(); }
+        bool is_zero() const { for (size_t i = 0; i < chunks; ++i) if (data[i]) return false; return true; }
+        bool is_neg() const { return data[chunks - 1] & (1u << ((Bits - 1) % 32)); }
+        
+        size_t ctlz() const {
+            size_t count = 0;
+            for (size_t n = 0; n < chunks; n++) {
+                chunk_t x = data[chunks - 1 - n];
+                size_t msb_chunk_bits = Bits % 32 != 0 ? Bits % 32 : 32;
+                count += (n == 0 ? msb_chunk_bits : 32);
+                if (x != 0) {
+                    for (; x != 0; count--) x >>= 1;
+                    break;
+                }
+            }
+            return count;
+        }
+        size_t ctpop() const {
+            size_t count = 0;
+            for (size_t n = 0; n < chunks; n++) {
+                for (chunk_t x = data[n]; x != 0; count++) x = x & (x - 1);
+            }
+            return count;
+        }
+        
+        template<size_t NewBits> value<NewBits> trunc() const {
+            value<NewBits> result;
+            for (size_t n = 0; n < result.chunks; n++) result.data[n] = data[n];
+            result.data[result.chunks - 1] &= result.msb_mask;
+            return result;
+        }
+        template<size_t NewBits> value<NewBits> zext() const {
+            value<NewBits> result;
+            for (size_t n = 0; n < chunks; n++) result.data[n] = data[n];
+            return result;
+        }
+        template<size_t NewBits> value<NewBits> sext() const {
+            value<NewBits> result;
+            for (size_t n = 0; n < chunks; n++) result.data[n] = data[n];
+            if (is_neg()) {
+                result.data[chunks - 1] |= ~result.msb_mask;
+                for (size_t n = chunks; n < result.chunks; n++) result.data[n] = ~0U;
+                result.data[result.chunks - 1] &= result.msb_mask;
+            }
+            return result;
+        }
+        template<size_t NewBits> value<NewBits> rtrunc() const {
+            value<NewBits> result;
+            size_t shift_chunks = (Bits - NewBits) / 32;
+            size_t shift_bits = (Bits - NewBits) % 32;
+            chunk_t carry = 0;
+            if (shift_chunks + result.chunks < chunks) {
+                carry = (shift_bits == 0) ? 0 : data[shift_chunks + result.chunks] << (32 - shift_bits);
+            }
+            for (size_t n = result.chunks; n > 0; n--) {
+                result.data[n - 1] = carry | (data[shift_chunks + n - 1] >> shift_bits);
+                carry = (shift_bits == 0) ? 0 : data[shift_chunks + n - 1] << (32 - shift_bits);
+            }
+            return result;
+        }
+        template<size_t NewBits> value<NewBits> rzext() const {
+            value<NewBits> result;
+            size_t shift_chunks = (NewBits - Bits) / 32;
+            size_t shift_bits = (NewBits - Bits) % 32;
+            chunk_t carry = 0;
+            for (size_t n = 0; n < chunks; n++) {
+                result.data[shift_chunks + n] = (data[n] << shift_bits) | carry;
+                carry = (shift_bits == 0) ? 0 : data[n] >> (32 - shift_bits);
+            }
+            if (shift_chunks + chunks < result.chunks) result.data[shift_chunks + chunks] = carry;
+            return result;
+        }
+
+        template<size_t AmountBits, bool Signed = false> value<Bits> shr(const value<AmountBits> &amount) const {
+            for (size_t n = 1; n < amount.chunks; n++) if (amount.data[n] != 0) return (Signed && is_neg()) ? value<Bits>().bit_not() : value<Bits>();
+            size_t shift_chunks = amount.data[0] / 32;
+            size_t shift_bits = amount.data[0] % 32;
+            if (shift_chunks >= chunks) return (Signed && is_neg()) ? value<Bits>().bit_not() : value<Bits>();
+            value<Bits> result;
+            chunk_t carry = 0;
+            for (size_t n = 0; n < chunks - shift_chunks; n++) {
+                result.data[chunks - shift_chunks - 1 - n] = carry | (data[chunks - 1 - n] >> shift_bits);
+                carry = (shift_bits == 0) ? 0 : data[chunks - 1 - n] << (32 - shift_bits);
+            }
+            if (Signed && is_neg()) {
+                size_t top_idx = amount.data[0] > Bits ? 0 : (Bits - amount.data[0]) / 32;
+                size_t top_bits = amount.data[0] > Bits ? 0 : (Bits - amount.data[0]) % 32;
+                for (size_t n = top_idx + 1; n < chunks; n++) result.data[n] = ~0U;
+                if (amount.data[0] != 0) result.data[top_idx] |= ~0U << top_bits;
+                result.data[result.chunks - 1] &= result.msb_mask;
+            }
+            return result;
+        }
+        template<size_t AmountBits> value<Bits> shl(const value<AmountBits> &amount) const {
+            for (size_t n = 1; n < amount.chunks; n++) if (amount.data[n] != 0) return {};
+            size_t shift_chunks = amount.data[0] / 32;
+            size_t shift_bits = amount.data[0] % 32;
+            if (shift_chunks >= chunks) return {};
+            value<Bits> result;
+            chunk_t carry = 0;
+            for (size_t n = 0; n < chunks - shift_chunks; n++) {
+                result.data[shift_chunks + n] = (data[n] << shift_bits) | carry;
+                carry = (shift_bits == 0) ? 0 : data[n] >> (32 - shift_bits);
+            }
+            result.data[result.chunks - 1] &= result.msb_mask;
+            return result;
+        }
+
+        value<Bits> bit_not() const {
+            value<Bits> result;
+            for (size_t n = 0; n < chunks; n++) result.data[n] = ~data[n];
+            result.data[chunks - 1] &= msb_mask;
+            return result;
+        }
+        value<Bits> neg() const {
+            value<Bits> result; bool carry = true;
+            for (size_t n = 0; n < chunks; n++) {
+                uint64_t sum = (uint64_t)~data[n] + carry;
+                result.data[n] = (uint32_t)sum; carry = sum >> 32;
+            }
+            result.data[chunks - 1] &= msb_mask;
+            return result;
+        }
+        bool ucmp(const value<Bits> &other) const {
+            bool carry = true;
+            for (size_t n = 0; n < chunks; n++) {
+                uint64_t r = (uint64_t)data[n] + ~other.data[n] + carry;
+                carry = r >> 32;
+            }
+            return !carry;
+        }
+        bool scmp(const value<Bits> &other) const {
+            bool carry = true; value<Bits> result;
+            for(size_t n=0; n<chunks; n++) {
+                uint64_t r = (uint64_t)data[n] + ~other.data[n] + carry;
+                result.data[n] = (uint32_t)r; carry = r >> 32;
+            }
+            bool overflow = (is_neg() == !other.is_neg()) && (is_neg() != result.is_neg());
+            return result.is_neg() ^ overflow;
+        }
+
+        std::pair<value<Bits>, value<Bits>> udivmod(value<Bits> divisor) const {
+            value<Bits> quotient, dividend = *this;
+            if (dividend.ucmp(divisor)) return {value<Bits>{0u}, dividend};
+            int64_t divisor_shift = divisor.ctlz() - dividend.ctlz();
+            divisor = divisor.shl(value<Bits>{(chunk_t)divisor_shift});
+            for (size_t step = 0; step <= (uint64_t)divisor_shift; step++) {
+                quotient = quotient.shl(value<Bits>{1u});
+                if (!dividend.ucmp(divisor)) {
+                    value<Bits> sub_res; bool carry = true;
+                    for (size_t n = 0; n < chunks; n++) {
+                        uint64_t r = (uint64_t)dividend.data[n] + ~divisor.data[n] + carry;
+                        sub_res.data[n] = (uint32_t)r; carry = r >> 32;
+                    }
+                    sub_res.data[chunks-1] &= msb_mask;
+                    dividend = sub_res;
+                    quotient.data[0] |= 1;
+                }
+                divisor = divisor.shr(value<Bits>{1u});
+            }
+            return {quotient, dividend};
+        }
+        std::pair<value<Bits>, value<Bits>> sdivmod(const value<Bits> &other) const {
+            value<Bits + 1> quotient, remainder;
+            value<Bits + 1> dividend = sext<Bits + 1>();
+            value<Bits + 1> divisor = other.template sext<Bits + 1>();
+            if (is_neg()) dividend = dividend.neg();
+            if (other.is_neg()) divisor = divisor.neg();
+            std::pair<value<Bits+1>, value<Bits+1>> res = dividend.udivmod(divisor);
+            quotient = res.first; remainder = res.second;
+            if (is_neg() != other.is_neg()) quotient = quotient.neg();
+            if (is_neg()) remainder = remainder.neg();
+            return {quotient.template trunc<Bits>(), remainder.template trunc<Bits>()};
+        }
+
+        template<size_t Stop, size_t Start> value<Bits> blit(const value<Stop - Start + 1> &source) const {
+            chunk_t start_mask = ~(~0U << (Start % 32));
+            chunk_t stop_mask = (Stop % 32 + 1 == 32) ? 0 : (~0U << (Stop % 32 + 1));
+            value<Bits> masked = *this;
+            if (Start / 32 == Stop / 32) {
+                masked.data[Start / 32] &= stop_mask | start_mask;
+            } else {
+                masked.data[Start / 32] &= start_mask;
+                for (size_t n = Start / 32 + 1; n < Stop / 32; n++) masked.data[n] = 0;
+                masked.data[Stop / 32] &= stop_mask;
+            }
+            value<Bits> shifted = source.template rzext<Stop + 1>().template zext<Bits>();
+            for(size_t i=0; i<chunks; i++) masked.data[i] |= shifted.data[i];
+            return masked;
+        }
+
+        template<size_t Count> value<Bits * Count> repeat() const {
+            static_assert(Bits == 1, "repeat() only valid for 1-bit values");
+            return *this ? value<Bits * Count>().bit_not() : value<Bits * Count>();
+        }
+        const value<Bits>& val() const { return *this; }
+        template<class T> T get() const { return static_cast<T>(data[0]); }
+    };
+
+    // Expression templates with reference stripping
+    template<class T, size_t Stop, size_t Start>
+    struct slice_expr : public expr_base<slice_expr<T, Stop, Start>> {
+        static constexpr size_t bits = Stop - Start + 1;
+        T &expr;
+        slice_expr(T &expr) : expr(expr) {}
+        operator value<bits>() const {
+            return static_cast<const value<T::bits> &>(expr).template rtrunc<T::bits - Start>().template trunc<bits>();
+        }
+        slice_expr<T, Stop, Start> &operator=(const value<bits> &rhs) {
+            expr = static_cast<const value<T::bits> &>(expr).template blit<Stop, Start>(rhs);
+            return *this;
+        }
+        const value<bits> val() const { return static_cast<const value<bits> &>(*this); }
+    };
+
+    template<class T, class U>
+    struct concat_expr : public expr_base<concat_expr<T, U>> {
+        using TR = typename std::remove_reference<T>::type;
+        using UR = typename std::remove_reference<U>::type;
+        static constexpr size_t bits = TR::bits + UR::bits;
+        T &ms_expr; U &ls_expr;
+        concat_expr(T &ms_expr, U &ls_expr) : ms_expr(ms_expr), ls_expr(ls_expr) {}
+        operator value<bits>() const {
+            value<bits> ms_shifted = static_cast<const value<TR::bits> &>(ms_expr).template rzext<bits>();
+            value<bits> ls_extended = static_cast<const value<UR::bits> &>(ls_expr).template zext<bits>();
+            value<bits> result;
+            for(size_t i=0; i<value<bits>::chunks; ++i) result.data[i] = ms_shifted.data[i] | ls_extended.data[i];
+            return result;
+        }
+        concat_expr<T, U> &operator=(const value<bits> &rhs) {
+            ms_expr = rhs.template rtrunc<TR::bits>();
+            ls_expr = rhs.template trunc<UR::bits>();
+            return *this;
+        }
+        const value<bits> val() const { return static_cast<const value<bits> &>(*this); }
+    };
+
+    template<class T>
+    struct expr_base {
+        template<size_t Stop, size_t Start = Stop> slice_expr<const T, Stop, Start> slice() const { return {*static_cast<const T *>(this)}; }
+        template<size_t Stop, size_t Start = Stop> slice_expr<T, Stop, Start> slice() { return {*static_cast<T *>(this)}; }
+        template<class U> concat_expr<const T, const U> concat(const U &other) const { return {*static_cast<const T *>(this), other}; }
+        template<class U> concat_expr<T, U> concat(U &&other) { return {*static_cast<T *>(this), other}; }
+    };
+
+    template<size_t Bits> struct wire {
+        value<Bits> curr, next;
+        wire() = default;
+        constexpr wire(const value<Bits>& v) : curr(v), next(v) {}
+        template<class T> void set(T v) { next.data[0] = v; }
+        template<class Observer> bool commit(Observer&) {
+            if (curr != next) { curr = next; return true; } return false;
+        }
+        bool commit() {
+            if (curr != next) { curr = next; return true; } return false;
+        }
+    };
+
+    struct performer { virtual ~performer() {} };
+    struct observer  { virtual ~observer() {} };
+
+    struct module {
+        virtual ~module() {}
+        virtual void reset() = 0;
+        virtual bool eval(performer* = nullptr) = 0;
+        virtual bool commit() = 0;
+        size_t step(performer* p = nullptr) {
+            size_t deltas = 0;
+            do { deltas++; } while (eval(p) && commit());
+            return deltas;
+        }
+        virtual void debug_info(debug_items*, debug_scopes*, std::string, metadata_map&& = {}) {}
+    };
+} // cxxrtl
+
+using cxxrtl::metadata_map;
+using cxxrtl::debug_items;
+using cxxrtl::debug_scopes;
+using cxxrtl::debug_item;
+using cxxrtl::debug_outline;
+
+// ─────────────────────────────────────────────────────────────────────
+// Yosys internal cell implementations – complete set for the SoC
+// ─────────────────────────────────────────────────────────────────────
+namespace cxxrtl_yosys {
+    using namespace cxxrtl;
+
+    // Logic / reductions
+    template<size_t Y, size_t A> value<Y> logic_not(const value<A> &a) { return value<Y>{ a.is_zero() ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> value<Y> logic_or(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() || !b.is_zero()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> value<Y> logic_and(const value<A> &a, const value<B> &b) { return value<Y>{ (!a.is_zero() && !b.is_zero()) ? 1u : 0u }; }
+    
+    template<size_t Y, size_t A> value<Y> reduce_bool(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
+    template<size_t Y, size_t A> value<Y> reduce_and(const value<A> &a) { return value<Y>{ a.bit_not().is_zero() ? 1u : 0u }; }
+    template<size_t Y, size_t A> value<Y> reduce_or(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
+    template<size_t Y, size_t A> value<Y> reduce_xor(const value<A> &a) { return value<Y>{ (a.ctpop() % 2) ? 1u : 0u }; }
+    
+    // Bitwise
+    template<size_t Y, size_t A> value<Y> not_u(const value<A> &a) { return a.template zext<Y>().bit_not(); }
+    template<size_t Y, size_t A> value<Y> not_s(const value<A> &a) { return a.template sext<Y>().bit_not(); }
+
+    // Unsigned add
+    template<size_t Y, size_t A, size_t B> value<Y> add_uu(const value<A>& a, const value<B>& b) {
+        value<Y> r{}; uint64_t carry = 0;
+        value<Y> a_ext = a.template zext<Y>();
+        value<Y> b_ext = b.template zext<Y>();
+        for (size_t i = 0; i < value<Y>::chunks; ++i) {
+            uint64_t sum = (uint64_t)a_ext.data[i] + b_ext.data[i] + carry;
+            r.data[i] = sum; carry = sum >> 32;
+        }
+        if constexpr (Y % 32 != 0) { r.data[value<Y>::chunks - 1] &= (1u << (Y % 32)) - 1; }
+        return r;
+    }
+    // Signed add
+    template<size_t Y, size_t A, size_t B> value<Y> add_ss(const value<A>& a, const value<B>& b) {
+        return add_uu<Y>(a.template sext<Y>(), b.template sext<Y>());
+    }
+
+    // Equality
+    template<size_t Y, size_t A, size_t B> value<Y> eq_uu(const value<A>& a, const value<B>& b) { 
+        return value<Y>{a.template zext<Y>() == b.template zext<Y>() ? 1u : 0u}; 
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> eq_ss(const value<A>& a, const value<B>& b) { 
+        return value<Y>{a.template sext<Y>() == b.template sext<Y>() ? 1u : 0u}; 
+    }
+
+    // Signed greater-than
+    template<size_t Y, size_t A, size_t B> value<Y> gt_ss(const value<A>& a, const value<B>& b) {
+        constexpr size_t BitsExt = A > B ? A : B;
+        return value<Y>{ b.template sext<BitsExt>().scmp(a.template sext<BitsExt>()) ? 1u : 0u };
+    }
+
+    // Multiplication
+    template<size_t Y, size_t A, size_t B> value<Y> mul_uu(const value<A>& a, const value<B>& b) {
+        constexpr size_t BitsM = A > B ? A : B;
+        return a.template zext<BitsM>().template mul<Y>(b.template zext<BitsM>());
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> mul_ss(const value<A>& a, const value<B>& b) {
+        constexpr size_t BitsM = A > B ? A : B;
+        return a.template sext<BitsM>().template mul<Y>(b.template sext<BitsM>());
+    }
+
+    // Division
+    template<size_t Y, size_t A, size_t B> value<Y> div_uu(const value<A>& a, const value<B>& b) {
+        constexpr size_t Bits = A > B ? A : B;
+        return a.template zext<Bits>().udivmod(b.template zext<Bits>()).first.template trunc<Y>();
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> div_ss(const value<A>& a, const value<B>& b) {
+        constexpr size_t Bits = A > B ? A : B;
+        value<Bits> dividend = a.template sext<Bits>();
+        value<Bits> divisor = b.template sext<Bits>();
+        return dividend.sdivmod(divisor).first.template trunc<Y>();
+    }
+
+    // Shifts
+    template<size_t Y, size_t A, size_t B> value<Y> shl_uu(const value<A>& a, const value<B>& b) {
+        return a.template zext<Y>().shl(b);
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> shl_su(const value<A>& a, const value<B>& b) {
+        return a.template sext<Y>().shl(b);
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> sshl_su(const value<A>& a, const value<B>& b) {
+        return shl_su<Y>(a, b);
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> shr_uu(const value<A>& a, const value<B>& b) {
+        return a.template zext<Y>().shr(b);
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> shr_su(const value<A>& a, const value<B>& b) {
+        return a.template sext<Y>().shr(b);
+    }
+    template<size_t Y, size_t A, size_t B> value<Y> sshr_su(const value<A>& a, const value<B>& b) {
+        return a.template sext<Y>().template shr<B, true>(b);
+    }
+}
+#define assert(x)
+#endif`;
+
+    /* ── MAIN PIPELINE ── */
+    async function doFullPipeline() {
+        currentVerilog = document.getElementById('verilogInput').value.trim();
+        if (!currentVerilog) return log('Verilog code is empty!', 'log-err');
+        
+        logEl.textContent = '';
+        document.getElementById('visuals').classList.add('hidden');
+        document.getElementById('runBtn').disabled = true;
+        document.getElementById('clangBtn').disabled = true;
+        window.filesOutCache = null;
+        
+        try {
+            log('Loading ELK + NetlistSVG…');
+            await loadScript('https://cdn.jsdelivr.net/npm/elkjs/lib/elk.bundled.js');
+            await loadScript('https://cdn.jsdelivr.net/npm/netlistsvg@1.0.2/built/netlistsvg.bundle.js');
+            
+            const yosysScript = [
+                'read_verilog -sv input.v',
+                'prep -top beast_soc',
+                'write_json rtl.json',
+                'write_cxxrtl sim.cpp',
+                'synth -top beast_soc',
+                'write_json synth.json'
+            ].join('; ');
+            
+            log('Invoking Yosys on 16-Bit Beast SoC…');
+            const filesOut = await runYosys(
+                ['-p', yosysScript],
+                { 'input.v': currentVerilog },
+                { stdout: b => b && log(toStr(b).trimEnd()), stderr: b => b && log(toStr(b).trimEnd()) }
+            );
+            
+            window.filesOutCache = filesOut;
+            
+            function getJson(name) {
+                const raw = filesOut[name];
+                if (!raw) throw new Error(`Missing ${name}`);
+                return fixYosysJson(JSON.parse(toStr(raw)));
+            }
+            
+            log('Rendering schematics…', 'log-ok');
+            document.getElementById('visuals').classList.remove('hidden');
+            renderSchematic('rtlSchematic', getJson('rtl.json'));
+            renderSchematic('synthSchematic', getJson('synth.json'));
+            
+            if (filesOut['sim.cpp']) {
+                cppEl.textContent = toStr(filesOut['sim.cpp']);
+                log('CXXRTL model generated! Check out the RAM and signed math.', 'log-ok');
+                document.getElementById('downloadCpp').onclick = () => {
+                    const blob = new Blob([toStr(filesOut['sim.cpp'])], {type: 'text/plain'});
+                    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'sim.cpp'; a.click();
+                };
+            }
+            log('✅ Yosys Pipeline complete', 'log-ok');
+            document.getElementById('clangBtn').disabled = false;
+        } catch (err) {
+            log('[CRITICAL ERROR] ' + err.message, 'log-err');
+            console.error(err);
+        } finally {
+            document.getElementById('runBtn').disabled = false;
+        }
+    }
+
+    /* ── Wasm Compilation & Integration ── */
+    async function compileToWasm() {
+        if (!window.filesOutCache?.['sim.cpp']) return;
+        document.getElementById('wasmStatus').textContent = 'Compiling SoC simulator to Bare-Metal Wasm...';
+        document.getElementById('clangBtn').disabled = true;
+        
+        try {
+            const { runClang } = await import('https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js');
+
+            const driverCpp = `\
+#include <cxxrtl/cxxrtl.h>
+
+void* operator new(size_t) { return (void*)0; }
+void* operator new[](size_t) { return (void*)0; }
+void operator delete(void*) noexcept {}
+void operator delete[](void*) noexcept {}
+void operator delete(void*, size_t) noexcept {}
+void operator delete[](void*, size_t) noexcept {}
+
+#include "sim.cpp"
+
+cxxrtl_design::p_beast__soc dut;
+
+extern "C" {
+    __attribute__((export_name("init"))) void init() { dut.reset(); dut.step(); }
+    __attribute__((export_name("tick"))) void tick() {
+        dut.p_clk.data[0] = 0; dut.step();
+        dut.p_clk.data[0] = 1; dut.step();
+    }
+    __attribute__((export_name("set_rst_n"))) void set_rst_n(int v) { dut.p_rst__n.data[0] = (uint32_t)v; dut.step(); }
+    __attribute__((export_name("set_op"))) void set_op(int v) { dut.p_op.data[0] = (uint32_t)(v & 0xF); dut.step(); }
+    __attribute__((export_name("set_a"))) void set_a(int v) { 
+        uint16_t val = (uint16_t)(v & 0xFFFF);
+        dut.p_in__a.next.data[0] = (uint32_t)val; 
+        dut.step(); 
+    }
+    __attribute__((export_name("set_b"))) void set_b(int v) { 
+        uint16_t val = (uint16_t)(v & 0xFFFF);
+        dut.p_in__b.next.data[0] = (uint32_t)val; 
+        dut.step(); 
+    }
+    
+    __attribute__((export_name("get_out_res"))) int32_t get_out_res() { 
+        return dut.p_out__res.curr.template get<int32_t>(); 
+    }
+    __attribute__((export_name("get_out_mem"))) uint16_t get_out_mem() { 
+        return dut.p_out__mem.curr.template get<uint16_t>(); 
+    }
+}
+`;
+            const files = {
+                'driver.cpp': driverCpp,
+                'sim.cpp': toStr(window.filesOutCache['sim.cpp']),
+                'cxxrtl': { 'cxxrtl.h': BARE_METAL_CXXRTL_H }
+            };
+
+            const clangArgs = [
+                'clang++', '-std=c++17', '-O3', '-I/', '--target=wasm32',
+                '-nostdlib', '-nostdinc', '-fno-exceptions', '-ferror-limit=0', '-fno-rtti', '-Wno-new-returns-null',
+                '-Wl,--no-entry', '-Wl,--allow-undefined', 'driver.cpp', '-o', 'sim.wasm'
+            ];
+
+            let clangOut = '', clangErr = '';
+            const result = await runClang(clangArgs, files, {
+                stdout: b => { if(b) { clangOut += dec.decode(b, {stream:true}); const lines = clangOut.split('\n'); clangOut = lines.pop(); for(const l of lines) log(l); } },
+                stderr: b => { if(b) { clangErr += dec.decode(b, {stream:true}); const lines = clangErr.split('\n'); clangErr = lines.pop(); for(const l of lines) log(l, 'log-warn'); } }
+            });
+
+            const wasmBin = result['sim.wasm'];
+            if (!wasmBin || wasmBin.byteLength === 0) throw new Error('No sim.wasm produced.');
+            
+            document.getElementById('wasmStatus').innerHTML = `<span class="tag-ok">Wasm simulator ready</span> · ${wasmBin.byteLength} bytes`;
+            
+            // Instantiation
+            const dummyEnv = new Proxy({}, { get: () => () => 0 });
+            const { instance } = await WebAssembly.instantiate(wasmBin, { env: dummyEnv, wbindgen_placeholder: dummyEnv });
+            wasmInstance = instance.exports;
+            
+            document.getElementById('simPanel').classList.remove('hidden');
+            
+            // ── Hardware Interface Logic ──
+            const uiOp = document.getElementById('uiOp');
+            const uiA = document.getElementById('uiA');
+            const uiB = document.getElementById('uiB');
+            const outResEl = document.getElementById('outRes');
+            const outMemEl = document.getElementById('outMem');
+
+            function updateOutputs() {
+                if (!wasmInstance) return;
+                outResEl.textContent = wasmInstance.get_out_res();
+                outMemEl.textContent = wasmInstance.get_out_mem();
+            }
+
+            function applyInputsAndTick() {
+                if (!wasmInstance) return;
+                wasmInstance.set_op(parseInt(uiOp.value) || 0);
+                wasmInstance.set_a(parseInt(uiA.value) || 0);
+                wasmInstance.set_b(parseInt(uiB.value) || 0);
+                wasmInstance.tick();
+                updateOutputs();
+            }
+
+            // Power On Reset
+            wasmInstance.init();
+            wasmInstance.set_rst_n(1);
+            updateOutputs();
+
+            // Tick Button
+            document.getElementById('tickBtn').onclick = applyInputsAndTick;
+
+            // Reset Button
+            document.getElementById('rstBtn').onclick = () => {
+                wasmInstance.set_rst_n(0);
+                setTimeout(() => { wasmInstance.set_rst_n(1); updateOutputs(); }, 30);
+            };
+
+        } catch (err) {
+            document.getElementById('wasmStatus').textContent = '[Clang error] ' + err.message;
+            log('[Clang error] ' + err.message, 'log-err');
+        } finally {
+            document.getElementById('clangBtn').disabled = false;
+        }
+    }
+    
+    document.getElementById('runBtn').addEventListener('click', doFullPipeline);
+    document.getElementById('clangBtn').addEventListener('click', compileToWasm);
+</script>
+</body>
+</html>
