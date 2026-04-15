@@ -39,7 +39,7 @@
 </head>
 <body>
     <h2>🔥 Beast Mode: RTL Stress Test Suite</h2>
-    <p>Testing robust limb-aligned chunking, bare-metal memory structures, and signed math boundaries.</p>
+    <p>Testing robust limb-aligned chunking, 16MB Bump Allocator, and signed math boundaries.</p>
     
     <div style="margin-bottom: 16px; display: flex; align-items: center; gap: 15px;">
         <select id="testSelector">
@@ -213,13 +213,21 @@
 endmodule`,
             driver: `
 #include <cxxrtl/cxxrtl.h>
-char dummy_heap[1024];
-void* operator new(size_t) { return dummy_heap; }
-void* operator new[](size_t) { return dummy_heap; }
+// 16MB Bump Allocator for dynamic memory in WASM
+char memory_pool[16 * 1024 * 1024]; 
+size_t memory_ptr = 0;
+void* operator new(size_t size) { 
+    size_t aligned = (size + 7) & ~7; 
+    void* ptr = &memory_pool[memory_ptr]; 
+    memory_ptr += aligned; 
+    return ptr; 
+}
+void* operator new[](size_t size) { return operator new(size); }
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
 void operator delete[](void*, size_t) noexcept {}
+
 #include "sim.cpp"
 cxxrtl_design::p_stress__wide dut;
 extern "C" {
@@ -252,13 +260,20 @@ extern "C" {
 endmodule`,
             driver: `
 #include <cxxrtl/cxxrtl.h>
-char dummy_heap[1024];
-void* operator new(size_t) { return dummy_heap; }
-void* operator new[](size_t) { return dummy_heap; }
+char memory_pool[16 * 1024 * 1024]; 
+size_t memory_ptr = 0;
+void* operator new(size_t size) { 
+    size_t aligned = (size + 7) & ~7; 
+    void* ptr = &memory_pool[memory_ptr]; 
+    memory_ptr += aligned; 
+    return ptr; 
+}
+void* operator new[](size_t size) { return operator new(size); }
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
 void operator delete[](void*, size_t) noexcept {}
+
 #include "sim.cpp"
 cxxrtl_design::p_stress__ram__collision dut;
 extern "C" {
@@ -289,13 +304,20 @@ extern "C" {
 endmodule`,
             driver: `
 #include <cxxrtl/cxxrtl.h>
-char dummy_heap[1024];
-void* operator new(size_t) { return dummy_heap; }
-void* operator new[](size_t) { return dummy_heap; }
+char memory_pool[16 * 1024 * 1024]; 
+size_t memory_ptr = 0;
+void* operator new(size_t size) { 
+    size_t aligned = (size + 7) & ~7; 
+    void* ptr = &memory_pool[memory_ptr]; 
+    memory_ptr += aligned; 
+    return ptr; 
+}
+void* operator new[](size_t size) { return operator new(size); }
 void operator delete(void*) noexcept {}
 void operator delete[](void*) noexcept {}
 void operator delete(void*, size_t) noexcept {}
 void operator delete[](void*, size_t) noexcept {}
+
 #include "sim.cpp"
 cxxrtl_design::p_stress__signed__dsp dut;
 extern "C" {
@@ -309,8 +331,10 @@ extern "C" {
     };
 
     // ─────────────────────────────────────────────────────────────────────
-    // THE BARE-METAL CXXRTL HEADER (The Final Boss)
-    // Fully Restored Shift Vectors and Memory Indices
+    // THE BARE-METAL CXXRTL HEADER (Universal Release)
+    // - Full cxxrtl_yosys namespace coverage
+    // - Dynamic Bump Allocation parameterized memory
+    // - Limb-aligned mathematics
     // ─────────────────────────────────────────────────────────────────────
     const BARE_METAL_CXXRTL_H = `#ifndef BARE_CXXRTL_H
 #define BARE_CXXRTL_H
@@ -462,6 +486,12 @@ namespace cxxrtl {
         }
         CXXRTL_ALWAYS_INLINE value neg() const { return value().sub(*this); }
         bool ucmp(const value &o) const { bool c = true; for(size_t i=0; i<chunks; i++) { uint64_t r = (uint64_t)data[i] + ~o.data[i] + c; c = r >> 32; } return !c; }
+        bool scmp(const value &o) const {
+            value r; bool c = true;
+            for(size_t i=0; i<chunks; i++) { uint64_t sum = (uint64_t)data[i] + ~o.data[i] + c; r.data[i] = (uint32_t)sum; c = sum >> 32; }
+            bool overflow = (is_neg() == !o.is_neg()) && (is_neg() != r.is_neg());
+            return r.is_neg() ^ overflow;
+        }
 
         std::pair<value, value> udivmod(value divisor) const {
             value q, d = *this; if (d.ucmp(divisor)) return {value{0u}, d};
@@ -505,6 +535,13 @@ namespace cxxrtl {
             if (sc + chunks < r.chunks) r.data[sc + chunks] = c; return r;
         }
 
+        template<size_t N> CXXRTL_ALWAYS_INLINE value<N> zcast() const {
+            if constexpr (N > Bits) return zext<N>(); else return trunc<N>();
+        }
+        template<size_t N> CXXRTL_ALWAYS_INLINE value<N> scast() const {
+            if constexpr (N > Bits) return sext<N>(); else return trunc<N>();
+        }
+
         // Shifts
         template<size_t A> CXXRTL_ALWAYS_INLINE value shl(const value<A> &amt) const {
             value r; size_t s = amt.data[0], sc = s / 32, sb = s % 32; if (sc >= chunks) return r;
@@ -524,6 +561,27 @@ namespace cxxrtl {
             size_t s = amt.data[0]; if (s >= Bits) s = Bits;
             for (size_t i = Bits - s; i < Bits; i++) r.data[i / 32] |= (1u << (i % 32));
             return r;
+        }
+
+        // Hardware Multiplexers
+        CXXRTL_ALWAYS_INLINE value<Bits> bwmux(const value<Bits> &b, const value<Bits> &s) const {
+            return (bit_and(s.bit_not())).bit_or(b.bit_and(s));
+        }
+        template<size_t ResultBits, size_t SelBits> value<ResultBits> bmux(const value<SelBits> &sel) const {
+            size_t amount = sel.data[0] * ResultBits, sc = amount / 32, sb = amount % 32;
+            value<ResultBits> r; chunk_t c = 0;
+            if (ResultBits % 32 + sb > 32) c = data[r.chunks + sc] << (32 - sb);
+            for (size_t n = 0; n < r.chunks; n++) {
+                r.data[r.chunks - 1 - n] = c | (data[r.chunks + sc - 1 - n] >> sb);
+                c = sb ? data[r.chunks + sc - 1 - n] << (32 - sb) : 0;
+            }
+            r.data[r.chunks - 1] &= r.msb_mask; return r;
+        }
+        template<size_t ResultBits, size_t SelBits> value<ResultBits> demux(const value<SelBits> &sel) const {
+            size_t amount = sel.data[0] * Bits, sc = amount / 32, sb = amount % 32;
+            value<ResultBits> r; chunk_t c = 0;
+            for (size_t n = 0; n < chunks; n++) { r.data[sc + n] = (data[n] << sb) | c; c = sb ? data[n] >> (32 - sb) : 0; }
+            if (Bits % 32 + sb > 32) r.data[sc + chunks] = c; return r;
         }
 
         // The Corrected Blit
@@ -591,15 +649,15 @@ namespace cxxrtl {
         bool commit() { if (curr != next) { curr = next; return true; } return false; }
     };
 
-    // Static memory fallback to avoid heap
+    // Parameterized dynamic memory using driver Bump Allocator
     template<size_t Width> struct memory { 
         size_t depth; 
-        value<Width> data[1024]; 
-        struct write { size_t i; value<Width> v, m; } q[16]; size_t qn = 0;
-        explicit memory(size_t d) : depth(d) {}
+        std::unique_ptr<value<Width>[]> data; 
+        struct write { size_t i; value<Width> v, m; } q[64]; size_t qn = 0;
+        explicit memory(size_t d) : depth(d), data(new value<Width>[d]) {}
         value<Width> &operator[](size_t i) { return data[i]; }
         const value<Width> &operator[](size_t i) const { return data[i]; }
-        void update(size_t i, value<Width> v, value<Width> m, int priority=0) { if(qn < 16) q[qn++] = {i, v, m}; }
+        void update(size_t i, value<Width> v, value<Width> m, int priority=0) { if(qn < 64) q[qn++] = {i, v, m}; }
         template<class Obs> bool commit(Obs&) { 
             bool ch = false; for(size_t k=0; k<qn; k++) { 
                 value<Width> n = data[q[k].i].bit_and(q[k].m.bit_not()).bit_or(q[k].v.bit_and(q[k].m)); 
@@ -621,6 +679,8 @@ namespace cxxrtl {
 
 namespace cxxrtl_yosys {
     using namespace cxxrtl;
+    
+    template<class T> CXXRTL_ALWAYS_INLINE constexpr T max(const T &a, const T &b) { return a > b ? a : b; }
 
     struct memory_index {
         bool valid;
@@ -641,41 +701,91 @@ namespace cxxrtl_yosys {
     template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_and(const value<A> &a) { return value<Y>{ a.bit_not().is_zero() ? 1u : 0u }; }
     template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_or(const value<A> &a) { return value<Y>{ a.is_zero() ? 0u : 1u }; }
     template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_xor(const value<A> &a) { return value<Y>{ (a.ctpop() % 2) ? 1u : 0u }; }
-    
-    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_u(const value<A> &a) { return a.template zext<Y>().bit_not(); }
-    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_s(const value<A> &a) { return a.template sext<Y>().bit_not(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> reduce_xnor(const value<A> &a) { return value<Y>{ (a.ctpop() % 2) ? 0u : 1u }; }
 
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().add(b.template zext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().add(b.template sext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().sub(b.template zext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().sub(b.template sext<Y>()); }
-    
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = A > B ? A : B; return a.template zext<Ext>().template mul<Y>(b.template zext<Ext>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = A > B ? A : B; return a.template sext<Ext>().template mul<Y>(b.template sext<Ext>()); }
-    
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> div_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = A > B ? A : B; return a.template zext<Ext>().udivmod(b.template zext<Ext>()).first.template trunc<Y>(); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> div_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = A > B ? A : B; return a.template sext<Ext>().sdivmod(b.template sext<Ext>()).first.template trunc<Y>(); }
-    
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shl_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().shl(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshl_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().shl(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shl_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().shl(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshl_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().shl(b); }
-    
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shr_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().shr(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshr_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().sshr(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shr_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().shr(b); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshr_su(const value<A>& a, const value<B>& b) { return a.template sext<Y>().sshr(b); }
-    
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{a.template zext<Ext>() == b.template zext<Ext>() ? 1u : 0u}; }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{a.template sext<Ext>() == b.template sext<Ext>() ? 1u : 0u}; }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> gt_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = (A > B) ? A : B; return value<Y>{b.template sext<Ext>().ucmp(a.template sext<Ext>()) ? 1u : 0u}; }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_u(const value<A> &a) { return a.template zcast<Y>().bit_not(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> not_s(const value<A> &a) { return a.template scast<Y>().bit_not(); }
 
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> and_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().bit_and(b.template zext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> and_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().bit_and(b.template sext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> or_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().bit_or(b.template zext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> or_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().bit_or(b.template sext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xor_uu(const value<A>& a, const value<B>& b) { return a.template zext<Y>().bit_xor(b.template zext<Y>()); }
-    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xor_ss(const value<A>& a, const value<B>& b) { return a.template sext<Y>().bit_xor(b.template sext<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> and_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().bit_and(b.template zcast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> and_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().bit_and(b.template scast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> or_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().bit_or(b.template zcast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> or_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().bit_or(b.template scast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xor_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().bit_xor(b.template zcast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xor_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().bit_xor(b.template scast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xnor_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().bit_xor(b.template zcast<Y>()).bit_not(); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> xnor_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().bit_xor(b.template scast<Y>()).bit_not(); }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().add(b.template zcast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> add_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().add(b.template scast<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().sub(b.template zext<Y>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sub_ss(const value<A>& a, const value<B>& b) { return a.template scast<Y>().sub(b.template scast<Y>()); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template zcast<Ext>().template mul<Y>(b.template zcast<Ext>()); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mul_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template scast<Ext>().template mul<Y>(b.template scast<Ext>()); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> div_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template zcast<Ext>().udivmod(b.template zcast<Ext>()).first.template trunc<Y>(); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> div_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template scast<Ext>().sdivmod(b.template scast<Ext>()).first.template trunc<Y>(); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mod_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template zcast<Ext>().udivmod(b.template zcast<Ext>()).second.template trunc<Y>(); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> mod_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return a.template scast<Ext>().sdivmod(b.template scast<Ext>()).second.template trunc<Y>(); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> modfloor_uu(const value<A> &a, const value<B> &b) { return mod_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> modfloor_ss(const value<A> &a, const value<B> &b) {
+        auto res = a.template scast<max(A,B)>().sdivmod(b.template scast<max(A,B)>());
+        if((b.is_neg() != a.is_neg()) && !res.second.is_zero()) return b.template scast<Y>().add(res.second.template trunc<Y>());
+        return res.second.template trunc<Y>();
+    }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> divfloor_uu(const value<A> &a, const value<B> &b) { return div_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> divfloor_ss(const value<A> &a, const value<B> &b) {
+        auto res = a.template scast<max(A,B)>().sdivmod(b.template scast<max(A,B)>());
+        if ((b.is_neg() != a.is_neg()) && !res.second.is_zero()) return res.first.template trunc<Y>().sub(value<Y>{1u});
+        return res.first.template trunc<Y>();
+    }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shl_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().shl(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshl_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().shl(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shl_su(const value<A>& a, const value<B>& b) { return a.template scast<Y>().shl(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshl_su(const value<A>& a, const value<B>& b) { return a.template scast<Y>().shl(b); }
+    
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shr_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().shr(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshr_uu(const value<A>& a, const value<B>& b) { return a.template zcast<Y>().sshr(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shr_su(const value<A>& a, const value<B>& b) { return a.template scast<Y>().shr(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> sshr_su(const value<A>& a, const value<B>& b) { return a.template scast<Y>().sshr(b); }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shift_uu(const value<A> &a, const value<B> &b) { return shr_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shift_su(const value<A> &a, const value<B> &b) { return shr_su<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shift_us(const value<A> &a, const value<B> &b) { return b.is_neg() ? shl_uu<Y>(a, b.template sext<B + 1>().neg()) : shr_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shift_ss(const value<A> &a, const value<B> &b) { return b.is_neg() ? shl_su<Y>(a, b.template sext<B + 1>().neg()) : shr_su<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shiftx_uu(const value<A> &a, const value<B> &b) { return shift_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shiftx_su(const value<A> &a, const value<B> &b) { return shift_su<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shiftx_us(const value<A> &a, const value<B> &b) { return shift_us<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> shiftx_ss(const value<A> &a, const value<B> &b) { return shift_ss<Y>(a, b); }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return value<Y>{a.template zcast<Ext>() == b.template zcast<Ext>() ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eq_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return value<Y>{a.template scast<Ext>() == b.template scast<Ext>() ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> ne_uu(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y>{ a.template zcast<Ext>() != b.template zcast<Ext>() ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> ne_ss(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y>{ a.template scast<Ext>() != b.template scast<Ext>() ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eqx_uu(const value<A> &a, const value<B> &b) { return eq_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> eqx_ss(const value<A> &a, const value<B> &b) { return eq_ss<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> nex_uu(const value<A> &a, const value<B> &b) { return ne_uu<Y>(a, b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> nex_ss(const value<A> &a, const value<B> &b) { return ne_ss<Y>(a, b); }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> gt_uu(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return value<Y>{b.template zcast<Ext>().ucmp(a.template zcast<Ext>()) ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> gt_ss(const value<A>& a, const value<B>& b) { constexpr size_t Ext = max(A, B); return value<Y>{b.template scast<Ext>().scmp(a.template scast<Ext>()) ? 1u : 0u}; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> ge_uu(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { !a.template zcast<Ext>().ucmp(b.template zcast<Ext>()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> ge_ss(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { !a.template scast<Ext>().scmp(b.template scast<Ext>()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> lt_uu(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { a.template zcast<Ext>().ucmp(b.template zcast<Ext>()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> lt_ss(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { a.template scast<Ext>().scmp(b.template scast<Ext>()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> le_uu(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { !b.template zcast<Ext>().ucmp(a.template zcast<Ext>()) ? 1u : 0u }; }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> le_ss(const value<A> &a, const value<B> &b) { constexpr size_t Ext = max(A, B); return value<Y> { !b.template scast<Ext>().scmp(a.template scast<Ext>()) ? 1u : 0u }; }
+
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> pos_u(const value<A> &a) { return a.template zcast<Y>(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> pos_s(const value<A> &a) { return a.template scast<Y>(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> neg_u(const value<A> &a) { return a.template zcast<Y>().neg(); }
+    template<size_t Y, size_t A> CXXRTL_ALWAYS_INLINE value<Y> neg_s(const value<A> &a) { return a.template scast<Y>().neg(); }
+
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> bmux(const value<A> &a, const value<B> &b) { return a.template bmux<Y>(b); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> bwmux(const value<A> &a, const value<A> &b, const value<B> &c) { return a.bwmux(b, c); }
+    template<size_t Y, size_t A, size_t B> CXXRTL_ALWAYS_INLINE value<Y> demux(const value<A> &a, const value<B> &b) { return a.template demux<Y>(b); }
 }
 #define assert(x)
 #endif`;
