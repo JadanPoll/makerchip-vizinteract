@@ -116,7 +116,6 @@ endmodule</textarea>
     </div>
 <script type="module">
     import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
-    import { WASI, File, OpenFile, ConsoleStdout } from 'https://cdn.jsdelivr.net/npm/@bjorn3/browser_wasi_shim@0.3.0/dist/index.js';
     
     const logEl = document.getElementById('console-log');
     const cppEl = document.getElementById('cppPreview');
@@ -173,7 +172,7 @@ endmodule</textarea>
                 netlistsvg.render(skin, netlistJson, (err, result) => err ? reject(err) : resolve(result));
             });
             el.innerHTML = typeof svg === 'string' ? svg : svg.outerHTML || String(svg);
-            log('Schematic rendered', 'log-ok');
+            log(`Schematic rendered: ${containerId}`, 'log-ok');
         } catch (e) {
             el.innerHTML = `<pre style="color:#f97171;font-size:0.8rem;white-space:pre-wrap;">[Render error]\n${e.message}</pre>`;
             log('[Render error] ' + e.message, 'log-warn');
@@ -181,153 +180,19 @@ endmodule</textarea>
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // BARE-METAL CXXRTL HEADER (Zero Dependencies, Zero Linker Errors)
-    // Now with bit-masking to handle correct hardware overflow!
+    // Fetch the Bare-Metal CXXRTL Header from GitHub via jsDelivr CDN
     // ─────────────────────────────────────────────────────────────────────
-    const BARE_METAL_CXXRTL_H = `#ifndef CXXRTL_H
-#define CXXRTL_H
-
-#define CXXRTL_EXTREMELY_COLD
-
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-typedef unsigned long size_t;
-
-#ifndef UINT32_C
-#define UINT32_C(c) c ## U
-#endif
-
-#ifndef UINT64_C
-#define UINT64_C(c) c ## ULL
-#endif
-
-namespace std {
-    template<class E> class initializer_list {
-        const E* _M_array; size_t _M_len;
-    public:
-        constexpr initializer_list(const E* a, size_t l) : _M_array(a), _M_len(l) {}
-        constexpr initializer_list() : _M_array(nullptr), _M_len(0) {}
-        constexpr size_t size() const { return _M_len; }
-        constexpr const E* begin() const { return _M_array; }
-        constexpr const E* end() const { return _M_array + _M_len; }
-    };
-    template<typename T> struct unique_ptr {
-        T* p;
-        unique_ptr(T* ptr) : p(ptr) {}
-        ~unique_ptr() {} 
-        T* operator->() const { return p; }
-    };
-    struct string {
-        string() {}
-        string(const char*) {}
-        bool empty() const { return true; }
-        size_t size() const { return 0; }
-        string substr(size_t, size_t) const { return *this; }
-        char operator[](size_t) const { return 0; }
-    };
-    template<typename T> T&& move(T& x) { return static_cast<T&&>(x); }
-}
-
-typedef void* cxxrtl_toplevel;
-struct _cxxrtl_toplevel {
-    template<typename T> _cxxrtl_toplevel(T) {}
-};
-
-namespace cxxrtl {
-    using chunk_t = uint32_t;
-    struct interior {};
-
-    struct metadata_pair {
-        template<typename K, typename V> metadata_pair(K, V) {}
-    };
-    struct metadata_map {
-        metadata_map() {}
-        metadata_map(std::initializer_list<metadata_pair>) {}
-    };
-
-    struct debug_item {
-        enum { INPUT=1, OUTPUT=2, INOUT=3, UNDRIVEN=4, DRIVEN_SYNC=8, DRIVEN_COMB=16 };
-    };
-    
-    struct debug_items { template<typename... Args> void add(Args&&...) {} };
-    struct debug_scopes { template<typename... Args> void add(Args&&...) {} };
-
-    template<size_t Bits> struct value {
-        static constexpr size_t chunks = (Bits + 31) / 32;
-        chunk_t data[chunks] = {};
-        value() = default;
-        constexpr value(chunk_t v) { data[0] = v; }
-        template<size_t O> bool operator==(const value<O>& o) const {
-            size_t max_c = chunks > value<O>::chunks ? chunks : value<O>::chunks;
-            for (size_t i = 0; i < max_c; ++i) {
-                chunk_t a = (i < chunks) ? data[i] : 0;
-                chunk_t b = (i < value<O>::chunks) ? o.data[i] : 0;
-                if (a != b) return false;
-            }
-            return true;
+    async function fetchCxxrtlHeader() {
+        // Points to JadanPoll/makerchip-vizinteract -> main branch -> cxxrtl_bare_baremetal.h
+        const cdnUrl = 'https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h';
+        log(`Fetching core silicon engine from jsDelivr CDN...`);
+        const response = await fetch(cdnUrl);
+        if (!response.ok) {
+            throw new Error(`CDN Fetch failed: ${response.status} ${response.statusText}`);
         }
-        template<size_t O> bool operator!=(const value<O>& o) const { return !(*this == o); }
-        operator bool() const { return data[0] != 0; }
-        template<size_t Offset> value<1> slice() const { return value<1>{ (data[0] >> Offset) & 1 }; }
-        bool val() const { return data[0] & 1; }
-        template<class T> T get() const { return static_cast<T>(data[0]); }
-    };
-
-    template<size_t Bits> struct wire {
-        value<Bits> curr, next;
-        wire() = default;
-        constexpr wire(const value<Bits>& v) : curr(v), next(v) {}
-        template<class T> void set(T v) { next.data[0] = v; }
-        template<class Observer> bool commit(Observer&) {
-            if (curr != next) { curr = next; return true; } return false;
-        }
-        bool commit() {
-            if (curr != next) { curr = next; return true; } return false;
-        }
-    };
-
-    struct performer { virtual ~performer() {} };
-    struct observer  { virtual ~observer() {} };
-
-    struct module {
-        virtual ~module() {}
-        virtual void reset() = 0;
-        virtual bool eval(performer* = nullptr) = 0;
-        virtual bool commit() = 0;
-        size_t step(performer* p = nullptr) {
-            size_t deltas = 0;
-            do { deltas++; } while (eval(p) && commit());
-            return deltas;
-        }
-        virtual void debug_info(debug_items*, debug_scopes*, std::string, metadata_map&& = {}) {}
-    };
-} // cxxrtl
-
-using cxxrtl::metadata_map;
-using cxxrtl::debug_items;
-using cxxrtl::debug_scopes;
-using cxxrtl::debug_item;
-
-namespace cxxrtl_yosys {
-    using namespace cxxrtl;
-    template<size_t Y, size_t A, size_t B> value<Y> add_uu(const value<A>& a, const value<B>& b) {
-        value<Y> r{}; uint64_t carry = 0;
-        for (size_t i = 0; i < value<Y>::chunks; ++i) {
-            uint32_t a_val = (i < value<A>::chunks) ? a.data[i] : 0;
-            uint32_t b_val = (i < value<B>::chunks) ? b.data[i] : 0;
-            uint64_t sum = (uint64_t)a_val + b_val + carry;
-            r.data[i] = sum; carry = sum >> 32;
-        }
-        // Correct masking to emulate hardware overflow behaviour
-        if constexpr (Y % 32 != 0) {
-            r.data[value<Y>::chunks - 1] &= (1u << (Y % 32)) - 1;
-        }
-        return r;
+        log('Core engine fetched successfully.', 'log-ok');
+        return await response.text();
     }
-    template<size_t Y, size_t A, size_t B> value<Y> eq_uu(const value<A>& a, const value<B>& b) { return value<Y>{a == b ? 1u : 0u}; }
-}
-#define assert(x)
-#endif`;
 
     /* ── MAIN PIPELINE ── */
     async function doFullPipeline() {
@@ -406,7 +271,12 @@ namespace cxxrtl_yosys {
         document.getElementById('clangBtn').disabled = true;
         
         try {
-            const { runClang } = await import('https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js');
+            // 1. Dynamically pull in the Clang compiler and our remote Header
+            const [{ runClang }, headerContent] = await Promise.all([
+                import('https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js'),
+                fetchCxxrtlHeader()
+            ]);
+            
             log('Clang loaded — compiling to standalone WebAssembly...');
 
             const driverCpp = `\
@@ -451,11 +321,12 @@ extern "C" {
     int get_rollover() { return (int)dut.p_rollover.data[0]; }
 }
 `;
+            // 2. Map the fetched string to the Virtual File System
             const files = {
                 'driver.cpp': driverCpp,
                 'sim.cpp': toStr(window.filesOutCache['sim.cpp']),
                 'cxxrtl': {
-                    'cxxrtl.h': BARE_METAL_CXXRTL_H
+                    'cxxrtl.h': headerContent
                 }
             };
 
