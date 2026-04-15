@@ -90,6 +90,7 @@ namespace cxxrtl {
     struct debug_items { template<typename... Args> void add(Args&&...) {} };
     struct debug_scopes { template<typename... Args> void add(Args&&...) {} };
     struct debug_outline { debug_outline() {} template<typename T> debug_outline(T) {} };
+    struct debug_alias {}; // << FIX 1: Resolves undeclared identifier 'debug_alias'
 
     template<class T> struct expr_base;
 
@@ -299,6 +300,8 @@ namespace cxxrtl {
         slice_expr& operator=(const value<bits>& rhs) { expr = static_cast<const value<T_base::bits>&>(expr).template blit<Stop, Start>(rhs); return *this; }
         value<bits> val() const { return operator value<bits>(); }
     };
+    
+    // << FIX 2: Added operator= to concat_expr to resolve Clang type casting errors
     template<class T, class U> struct concat_expr : public expr_base<concat_expr<T, U>> {
         typedef typename std::remove_reference<T>::type T_base; typedef typename std::remove_reference<U>::type U_base;
         static constexpr size_t bits = T_base::bits + U_base::bits; T &ms; U &ls; concat_expr(T &m, U &l) : ms(m), ls(l) {}
@@ -306,8 +309,11 @@ namespace cxxrtl {
             value<bits> m_s = static_cast<const value<T_base::bits>&>(ms).template rzext<bits>(), l_e = static_cast<const value<U_base::bits>&>(ls).template zext<bits>(), r;
             for(size_t i=0; i<value<bits>::chunks; i++) r.data[i] = m_s.data[i] | l_e.data[i]; return r;
         }
+        concat_expr& operator=(const value<bits>& rhs) { ms = rhs.template rtrunc<T_base::bits>(); ls = rhs.template trunc<U_base::bits>(); return *this; }
+        template<typename RHS> concat_expr& operator=(const RHS& rhs) { return operator=(static_cast<value<bits>>(rhs)); }
         value<bits> val() const { return operator value<bits>(); }
     };
+    
     template<class T> struct expr_base {
         template<size_t Stop, size_t Start = Stop> slice_expr<const T, Stop, Start> slice() const { return {*static_cast<const T *>(this)}; }
         template<size_t Stop, size_t Start = Stop> slice_expr<T, Stop, Start> slice() { return {*static_cast<T *>(this)}; }
