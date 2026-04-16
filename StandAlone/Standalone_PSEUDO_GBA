@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SERV RISC-V — Hardware Studio</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0d0f1a; color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        h2 { color: #9cdcfe; margin-top: 0; font-family: monospace; letter-spacing: 1px; }
+        
+        .toolbar { display: flex; gap: 10px; width: 100%; max-width: 1200px; margin-bottom: 20px; flex-wrap: wrap; }
+        button { padding: 12px 20px; font-size: 0.95rem; background: #1565c0; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: background 0.2s; flex: 1; min-width: 150px; }
+        button:hover:not(:disabled) { background: #1e88e5; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-run { background: #2e7d32; } .btn-run:hover:not(:disabled) { background: #388e3c; }
+        .btn-pause { background: #b08d00; } .btn-pause:hover:not(:disabled) { background: #d4aa00; }
+        
+        .console-container { display: flex; flex-wrap: wrap; gap: 20px; width: 100%; max-width: 1200px; }
+        .panel { background: #1e2030; border: 2px solid #2a3050; border-radius: 8px; padding: 15px; flex: 1 1 400px; box-sizing: border-box; }
+        
+        /* GBA Screen */
+        #screen { background: #000; width: 100%; max-width: 480px; aspect-ratio: 240/160; image-rendering: pixelated; display: block; margin: 0 auto; border: 2px solid #555; }
+        .controls-help { color: #888; font-size: 0.85rem; text-align: center; margin-top: 10px; font-family: monospace; }
+        
+        /* UART Terminal */
+        #terminal { background: #000; height: 200px; overflow-y: auto; color: #69db7c; font-size: 1rem; font-family: monospace; white-space: pre-wrap; padding: 10px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.8); }
+        #uartInput { width: 100%; background: #111; border: 1px solid #444; color: #69db7c; padding: 8px; font-family: monospace; margin-top: 10px; box-sizing: border-box; outline: none; }
+        
+        /* Code Editor */
+        #editor { width: 100%; height: 350px; background: #0d0f1a; color: #ce9178; font-family: monospace; font-size: 1rem; padding: 10px; border: 1px solid #444; border-radius: 4px; box-sizing: border-box; outline: none; resize: vertical; white-space: pre; }
+        #editor:focus { border-color: #69db7c; }
+
+        /* Registers Inspector */
+        .reg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 4px; background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.85rem; }
+        .reg-cell { display: flex; justify-content: space-between; background: #0d0f1a; padding: 4px 8px; border: 1px solid #2a3050; border-radius: 3px; }
+        .reg-name { color: #569cd6; font-weight: bold; }
+        .reg-val { color: #dcdcaa; }
+
+        /* Memory Inspector */
+        .mem-toolbar { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; font-family: monospace; font-size: 0.9rem;}
+        .mem-toolbar input { background: #0d0f1a; border: 1px solid #444; color: #9cdcfe; padding: 6px; border-radius: 4px; font-family: monospace; width: 120px;}
+        .mem-grid { background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.9rem; }
+        .mem-row { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; }
+        .mem-addr { color: #888; width: 90px; }
+        .mem-cell { background: #0d0f1a; color: #ce9178; border: 1px solid #2a3050; padding: 4px; width: 75px; text-align: center; border-radius: 3px; font-family: monospace; transition: all 0.2s; }
+        .mem-cell:focus { outline: none; border-color: #69db7c; color: #69db7c; background: #000; }
+    </style>
+</head>
+<body>
+    <h2>🛠️ SERV RISC-V: Interactive Hardware Studio</h2>
+    
+    <div class="toolbar">
+        <button id="bootBtn" class="btn-run">▶ Compile & Boot SoC</button>
+        <button id="btnFast" class="sim-ctrl" disabled>⏩ Fast Run</button>
+        <button id="btnSlow" class="sim-ctrl" disabled>▶ Slow Run</button>
+        <button id="btnPause" class="sim-ctrl btn-pause" disabled>⏸ Pause</button>
+        <button id="btnTickInst" class="sim-ctrl" disabled>⏭ Step (1 Inst)</button>
+        <button id="btnTickCyc" class="sim-ctrl" disabled>⏭ Tick (1 Cycle)</button>
+    </div>
+
+    <div class="console-container">
+        <div class="panel" style="flex-basis: 100%;">
+            <h3 style="margin-top:0; color:#ce9178;">📝 Live Assembly Editor</h3>
+<textarea id="editor" spellcheck="false">
+# ── SERV Hardware Map ──
+# 0x80000000 : UART TX (Write)
+# 0x80000004 : UART RX (Read)
+# 0x80000008 : Gamepad (Read)
+# 0x90000000 : VRAM (240x160 32-bit RGBA)
+
+lui s0, 0x80000      # s0 = 0x80000000 (UART Base)
+addi s1, s0, 4       # s1 = 0x80000004 (UART RX)
+addi s2, s0, 8       # s2 = 0x80000008 (Gamepad)
+lui s3, 0x90000      # s3 = 0x90000000 (VRAM Base)
+lui s4, 0x00025      # VRAM Max Offset = 153600 = 0x25800
+addi s4, s4, 0x800
+add s5, zero, zero   # s5 = VRAM Current Offset
+
+loop:
+# 1. Echo UART RX to TX
+lw t0, 0(s1)         
+addi t1, zero, -1
+beq t0, t1, skip_rx  
+sb t0, 0(s0)         
+skip_rx:
+
+# 2. Read Gamepad & Pick Color
+lw t0, 0(s2)         
+beq t0, zero, no_btn 
+
+# If button pressed -> Green (0x00FF00FF)
+lui t1, 0x00FF0
+addi t1, t1, 0xFF
+j draw
+
+no_btn:
+# If no button -> Purple (0x800080FF)
+lui t1, 0x80008
+addi t1, t1, 0xFF
+
+draw:
+# 3. Draw Pixel to VRAM
+add t2, s3, s5       # t2 = VRAM Base + Offset
+sw t1, 0(t2)         # Write Color
+    
+# 4. Advance Pixel
+addi s5, s5, 4       
+blt s5, s4, loop     # If not at end of screen, loop
+add s5, zero, zero   # Else, reset to top-left
+j loop
+</textarea>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; color:#ce9178; text-align:center;">Video RAM (0x90000000)</h3>
+            <canvas id="screen" width="240" height="160"></canvas>
+            <div class="controls-help">Controls: Arrows (D-Pad), Z (A), X (B), Enter (Start)</div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; color:#ce9178;">Live CPU Registers</h3>
+            <div class="reg-grid" id="regView"></div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; color:#ce9178;">UART Terminal (0x80000000)</h3>
+            <div id="terminal">_ System Offline...</div>
+            <input type="text" id="uartInput" placeholder="Click here and type to send to UART RX..." disabled autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="panel" style="flex-basis: 100%;">
+            <h3 style="margin-top:0; color:#ce9178;">Live Memory Inspector</h3>
+            <div class="mem-toolbar">
+                Go to Address: 
+                <input type="text" id="memBaseInput" value="0x00000000">
+                <span style="color: #888; font-size: 0.8rem; margin-left: 10px;">(RAM: 0x00000000 | UART: 0x80000000 | VRAM: 0x90000000)</span>
+            </div>
+            <div class="mem-grid" id="memView"></div>
+            <div class="controls-help" style="text-align: left;">* Edit any cell and press Enter to hot-swap the value in live hardware.</div>
+        </div>
+    </div>
+
+<script type="module">
+import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+import { runClang } from 'https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js';
+
+const term = document.getElementById('terminal');
+const bootBtn = document.getElementById('bootBtn');
+const uartInput = document.getElementById('uartInput');
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+
+let cpu = null;
+let memBaseAddr = 0x00000000;
+let runSpeed = 0; 
+
+// ── ROBUST FULL ASSEMBLER ──────────────────────────────────────────────────
+const ASM = (lines) => {
+    const REG = { zero:0, ra:1, sp:2, gp:3, tp:4, t0:5, t1:6, t2:7, s0:8, fp:8, s1:9, a0:10, a1:11, a2:12, a3:13, a4:14, a5:15, a6:16, a7:17, s2:18, s3:19, s4:20, s5:21, s6:22, s7:23, s8:24, s9:25, s10:26, s11:27, t3:28, t4:29, t5:30, t6:31 };
+    const encI = (imm,rs1,f3,rd,op) => (((imm&0xFFF)<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
+    const encS = (imm,rs2,rs1,f3,op) => ((((imm>>5)&0x7F)<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|((imm&0x1F)<<7)|op)>>>0;
+    const encB = (imm,rs2,rs1,f3,op) => ((((imm>>12)&1)<<31)|(((imm>>5)&0x3F)<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(((imm>>1)&0xF)<<8)|(((imm>>11)&1)<<7)|op)>>>0;
+    const encJ = (imm,rd,op) => ((((imm>>20)&1)<<31)|(((imm>>1)&0x3FF)<<21)|(((imm>>11)&1)<<20)|(((imm>>12)&0xFF)<<12)|(rd<<7)|op)>>>0;
+    const encU = (imm,rd,op) => ((imm&0xFFFFF000)|(rd<<7)|op)>>>0;
+    const encR = (f7,rs2,rs1,f3,rd,op) => ((f7<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
+
+    const labels = {}; 
+    let pc = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+        let l = lines[i].split('#')[0].split('//')[0].trim();
+        if (!l) continue;
+        if (l.includes(':')) { labels[l.split(':')[0].trim()] = pc; l = l.split(':').slice(1).join(':').trim(); }
+        if (l) pc += 4; 
+    }
+    
+    pc = 0;
+    return lines.map((originalLine, index) => {
+        let l = originalLine.split('#')[0].split('//')[0].trim();
+        if (l.includes(':')) l = l.split(':').slice(1).join(':').trim();
+        if (!l) return null;
+        
+        try {
+            const p = l.split(/[\s,()]+/).filter(x => x);
+            const op = p[0];
+            const getReg = r => { if(REG[r]===undefined) throw new Error(`Unknown register '${r}'`); return REG[r]; };
+            const getNum = n => { 
+                if(labels[n] !== undefined) return labels[n] - pc; 
+                let parsed = parseInt(n);
+                if(isNaN(parsed)) throw new Error(`Invalid immediate or unknown label '${n}'`);
+                return parsed;
+            };
+
+            let w = 0;
+            switch(op) {
+                case 'addi':   w = encI(getNum(p[3]), getReg(p[2]), 0, getReg(p[1]), 0x13); break;
+                case 'slti':   w = encI(getNum(p[3]), getReg(p[2]), 2, getReg(p[1]), 0x13); break;
+                case 'sltiu':  w = encI(getNum(p[3]), getReg(p[2]), 3, getReg(p[1]), 0x13); break;
+                case 'xori':   w = encI(getNum(p[3]), getReg(p[2]), 4, getReg(p[1]), 0x13); break;
+                case 'ori':    w = encI(getNum(p[3]), getReg(p[2]), 6, getReg(p[1]), 0x13); break;
+                case 'andi':   w = encI(getNum(p[3]), getReg(p[2]), 7, getReg(p[1]), 0x13); break;
+                case 'slli':   w = encI((getNum(p[3])&0x1F), getReg(p[2]), 1, getReg(p[1]), 0x13); break;
+                case 'srli':   w = encI((getNum(p[3])&0x1F), getReg(p[2]), 5, getReg(p[1]), 0x13); break;
+                case 'srai':   w = encI((getNum(p[3])&0x1F)|0x400, getReg(p[2]), 5, getReg(p[1]), 0x13); break;
+                case 'add':    w = encR(0, getReg(p[3]), getReg(p[2]), 0, getReg(p[1]), 0x33); break;
+                case 'sub':    w = encR(0x20, getReg(p[3]), getReg(p[2]), 0, getReg(p[1]), 0x33); break;
+                case 'sll':    w = encR(0, getReg(p[3]), getReg(p[2]), 1, getReg(p[1]), 0x33); break;
+                case 'slt':    w = encR(0, getReg(p[3]), getReg(p[2]), 2, getReg(p[1]), 0x33); break;
+                case 'sltu':   w = encR(0, getReg(p[3]), getReg(p[2]), 3, getReg(p[1]), 0x33); break;
+                case 'xor':    w = encR(0, getReg(p[3]), getReg(p[2]), 4, getReg(p[1]), 0x33); break;
+                case 'srl':    w = encR(0, getReg(p[3]), getReg(p[2]), 5, getReg(p[1]), 0x33); break;
+                case 'sra':    w = encR(0x20, getReg(p[3]), getReg(p[2]), 5, getReg(p[1]), 0x33); break;
+                case 'or':     w = encR(0, getReg(p[3]), getReg(p[2]), 6, getReg(p[1]), 0x33); break;
+                case 'and':    w = encR(0, getReg(p[3]), getReg(p[2]), 7, getReg(p[1]), 0x33); break;
+                case 'lui':    w = encU(getNum(p[2])<<12, getReg(p[1]), 0x37); break;
+                case 'auipc':  w = encU(getNum(p[2])<<12, getReg(p[1]), 0x17); break;
+                case 'lb':     w = encI(getNum(p[2]), getReg(p[3]), 0, getReg(p[1]), 0x03); break;
+                case 'lh':     w = encI(getNum(p[2]), getReg(p[3]), 1, getReg(p[1]), 0x03); break;
+                case 'lw':     w = encI(getNum(p[2]), getReg(p[3]), 2, getReg(p[1]), 0x03); break;
+                case 'lbu':    w = encI(getNum(p[2]), getReg(p[3]), 4, getReg(p[1]), 0x03); break;
+                case 'lhu':    w = encI(getNum(p[2]), getReg(p[3]), 5, getReg(p[1]), 0x03); break;
+                case 'sb':     w = encS(getNum(p[2]), getReg(p[1]), getReg(p[3]), 0, 0x23); break;
+                case 'sh':     w = encS(getNum(p[2]), getReg(p[1]), getReg(p[3]), 1, 0x23); break;
+                case 'sw':     w = encS(getNum(p[2]), getReg(p[1]), getReg(p[3]), 2, 0x23); break;
+                case 'beq':    w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 0, 0x63); break;
+                case 'bne':    w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 1, 0x63); break;
+                case 'blt':    w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 4, 0x63); break;
+                case 'bge':    w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 5, 0x63); break;
+                case 'bltu':   w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 6, 0x63); break;
+                case 'bgeu':   w = encB(getNum(p[3]), getReg(p[2]), getReg(p[1]), 7, 0x63); break;
+                case 'jal':    w = encJ(getNum(p[2]), getReg(p[1]), 0x6f); break; 
+                case 'jalr':   w = encI(getNum(p[3]), getReg(p[2]), 0, getReg(p[1]), 0x67); break;
+                case 'j':      w = encJ(getNum(p[1]), 0, 0x6f); break; 
+                case 'csrrw':  w = encI(getNum(p[2]), getReg(p[3]), 1, getReg(p[1]), 0x73); break;
+                case 'csrrs':  w = encI(getNum(p[2]), getReg(p[3]), 2, getReg(p[1]), 0x73); break;
+                case 'csrrc':  w = encI(getNum(p[2]), getReg(p[3]), 3, getReg(p[1]), 0x73); break;
+                case 'csrrwi': w = encI(getNum(p[2]), getNum(p[3])&0x1F, 5, getReg(p[1]), 0x73); break;
+                case 'csrrsi': w = encI(getNum(p[2]), getNum(p[3])&0x1F, 6, getReg(p[1]), 0x73); break;
+                case 'csrrci': w = encI(getNum(p[2]), getNum(p[3])&0x1F, 7, getReg(p[1]), 0x73); break;
+                case 'csrr':   w = encI(getNum(p[2]), 0, 2, getReg(p[1]), 0x73); break; 
+                case 'ecall':  w = 0x00000073; break;
+                case 'ebreak': w = 0x00100073; break;
+                case 'mret':   w = 0x30200073; break;
+                case 'nop':    w = 0x00000013; break;
+                case '.word':  w = getNum(p[1]) >>> 0; break;
+                default: throw new Error(`Unknown instruction '${op}'`);
+            }
+
+            pc += 4; return w;
+        } catch (err) {
+            throw new Error(`Line ${index + 1}: ${err.message} \n> ${originalLine.trim()}`);
+        }
+    }).filter(w => w !== null);
+};
+
+// ── REGISTERS DOM LOGIC ────────────────────────────────────────────────────
+const ABI_NAMES = ["zero","ra","sp","gp","tp","t0","t1","t2","s0","s1","a0","a1","a2","a3","a4","a5","a6","a7","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","t3","t4","t5","t6"];
+function initRegisters() {
+    const view = document.getElementById('regView');
+    view.innerHTML = `<div class="reg-cell"><span class="reg-name">PC</span><span class="reg-val" id="reg-pc">00000000</span></div>`;
+    for(let i=0; i<32; i++) {
+        view.innerHTML += `<div class="reg-cell"><span class="reg-name">${ABI_NAMES[i]}</span><span class="reg-val" id="reg-${i}">00000000</span></div>`;
+    }
+}
+function refreshRegisters() {
+    if(!cpu) return;
+    document.getElementById('reg-pc').textContent = (cpu.get_pc() >>> 0).toString(16).padStart(8,'0');
+    for(let i=0; i<32; i++) {
+        document.getElementById(`reg-${i}`).textContent = (cpu.get_reg(i) >>> 0).toString(16).padStart(8,'0');
+    }
+}
+
+// ── MEMORY DOM LOGIC ───────────────────────────────────────────────────────
+function initMemoryGrid() {
+    const view = document.getElementById('memView');
+    view.innerHTML = '';
+    for(let i=0; i<8; i++) {
+        let row = document.createElement('div');
+        row.className = 'mem-row';
+        let addrSpan = document.createElement('span');
+        addrSpan.className = 'mem-addr';
+        addrSpan.id = `mem-addr-${i}`;
+        row.appendChild(addrSpan);
+        
+        for(let j=0; j<4; j++) {
+            let input = document.createElement('input');
+            input.className = 'mem-cell';
+            input.id = `mem-cell-${i}-${j}`;
+            input.maxLength = 8;
+            input.addEventListener('change', (e) => {
+                if(!cpu) return;
+                let addr = (memBaseAddr + (i * 16) + (j * 4)) >>> 0;
+                let val = parseInt(e.target.value, 16) >>> 0;
+                if(!isNaN(val)) cpu.debug_write(addr, val);
+            });
+            input.addEventListener('keydown', (e) => { if(e.key === 'Enter') e.target.blur(); });
+            row.appendChild(input);
+        }
+        view.appendChild(row);
+    }
+    document.getElementById('memBaseInput').addEventListener('change', (e) => {
+        let newBase = parseInt(e.target.value, 16);
+        if(!isNaN(newBase)) memBaseAddr = (newBase & ~0xF) >>> 0;
+        e.target.value = `0x${memBaseAddr.toString(16).padStart(8,'0')}`;
+        refreshMemoryGrid();
+    });
+}
+
+function refreshMemoryGrid() {
+    if(!cpu) return;
+    for(let i=0; i<8; i++) {
+        let rowAddr = (memBaseAddr + (i * 16)) >>> 0;
+        document.getElementById(`mem-addr-${i}`).textContent = `0x${rowAddr.toString(16).padStart(8,'0')}`;
+        for(let j=0; j<4; j++) {
+            let input = document.getElementById(`mem-cell-${i}-${j}`);
+            if (document.activeElement !== input) {
+                let addr = (rowAddr + (j * 4)) >>> 0;
+                input.value = (cpu.debug_read(addr) >>> 0).toString(16).padStart(8,'0');
+            }
+        }
+    }
+}
+
+// ── C++ DRIVER (Fixed Reset, RAM, UART Latch, & VRAM Masking) ──────────────
+const DRIVER_CPP = `
+#include <cxxrtl/cxxrtl.h>
+#include "sim.cpp"
+
+static char heap[4194304]; // Increased to 4MB for safety
+static size_t heap_top = 0;
+void* operator new(size_t n) { heap_top = (heap_top + 7) & ~7u; void* p = &heap[heap_top]; heap_top += n; return p; }
+void* operator new[](size_t n) { return operator new(n); }
+void operator delete(void*) noexcept {}
+void operator delete[](void*) noexcept {}
+void operator delete(void*, unsigned long) noexcept {}
+extern "C" { int __cxa_atexit(void (*f)(void *), void *p, void *d) { return 0; } void* __dso_handle = (void*)0; }
+
+cxxrtl_design::p_zero__soc dut;
+uint32_t ram[16384];  // 64 KB RAM
+uint32_t vram[38400]; // 240 * 160 pixels
+char uart_tx[65536];
+int tx_idx = 0;
+int uart_rx = -1;
+uint32_t buttons = 0;
+
+int prev_dcyc = 0;
+uint32_t latched_rx = 0xFFFFFFFFu;
+uint32_t current_pc = 0;
+
+extern "C" {
+    __attribute__((export_name("init"))) void init() {
+        for(int i=0;i<16384;i++) ram[i]=0;
+        dut.reset(); 
+        for(size_t i = 0; i < 576; i++) dut.memory_p_cpu_2e_rf__ram_2e_memory.data[i] = cxxrtl::value<2>{0u};
+        dut.p_rst__n.data[0] = 0; 
+        for(int i=0;i<200;i++){ dut.p_clk.data[0]=0; dut.step(); dut.p_clk.data[0]=1; dut.step(); }
+        dut.p_rst__n.data[0] = 1; dut.step();
+    }
+    __attribute__((export_name("load"))) void load(int i, uint32_t w) { if (i < 16384) ram[i] = w; }
+    
+    __attribute__((export_name("get_vram"))) uint32_t* get_vram() { return vram; }
+    __attribute__((export_name("set_buttons"))) void set_buttons(uint32_t b) { buttons = b; }
+    __attribute__((export_name("send_rx"))) void send_rx(int char_code) { uart_rx = char_code; }
+    __attribute__((export_name("read_tx_idx"))) int read_tx_idx() { return tx_idx; }
+    __attribute__((export_name("read_tx_char"))) char read_tx_char(int i) { return uart_tx[i]; }
+
+    // --- REGISTERS & PC ---
+    __attribute__((export_name("get_pc"))) uint32_t get_pc() { return current_pc; }
+    __attribute__((export_name("get_reg"))) uint32_t get_reg(int r) {
+        if (r == 0) return 0;
+        uint32_t val = 0;
+        int base = r * 16;
+        for (int i = 0; i < 16; i++) {
+            uint32_t chunk = dut.memory_p_cpu_2e_rf__ram_2e_memory.data[base + i].data[0] & 3;
+            val |= (chunk << (i * 2));
+        }
+        return val;
+    }
+
+    // --- DEBUG MEMORY ---
+    __attribute__((export_name("debug_read"))) uint32_t debug_read(uint32_t addr) {
+        if (addr < 65536) return ram[addr >> 2];
+        if (addr == 0x80000000u) return 0; 
+        if (addr == 0x80000004u) return uart_rx;
+        if (addr == 0x80000008u) return buttons;
+        if ((addr & 0xFF000000u) == 0x90000000u) {
+            uint32_t v_idx = (addr & 0x00FFFFFFu) >> 2;
+            if (v_idx < 38400) return vram[v_idx];
+        }
+        return 0xDEADBEEF;
+    }
+    __attribute__((export_name("debug_write"))) void debug_write(uint32_t addr, uint32_t val) {
+        if (addr < 65536) ram[addr >> 2] = val;
+        else if (addr == 0x80000000u) { if (tx_idx < 65535) uart_tx[tx_idx++] = (char)(val & 0xFF); }
+        else if (addr == 0x80000004u) uart_rx = val;
+        else if (addr == 0x80000008u) buttons = val;
+        else if ((addr & 0xFF000000u) == 0x90000000u) {
+            uint32_t v_idx = (addr & 0x00FFFFFFu) >> 2;
+            if (v_idx < 38400) vram[v_idx] = val;
+        }
+    }
+
+    // --- EXECUTION STEP ---
+    __attribute__((export_name("step"))) void step() {
+        dut.p_clk.data[0] = 0; dut.step();
+        
+        if(dut.p_ibus__cyc.data[0]) {
+            current_pc = dut.p_ibus__adr.data[0]; 
+            dut.p_ibus__rdt.data[0] = ram[(current_pc >> 2) & 0x3FFF];
+            dut.p_ibus__ack.data[0] = 1;
+        }
+
+        uint32_t dcyc = dut.p_dbus__cyc.data[0];
+        if(dcyc) {
+            uint32_t dadr = dut.p_dbus__adr.data[0];
+            uint32_t dwe = dut.p_dbus__we.data[0];
+            uint32_t ddat = dut.p_dbus__dat.data[0];
+
+            if ((dadr & 0xFF000000u) == 0x90000000u) {
+                uint32_t v_idx = (dadr & 0x00FFFFFFu) >> 2;
+                if(v_idx < 38400 && dwe) {
+                    uint32_t sel = dut.p_dbus__sel.data[0];
+                    uint32_t mask = 0;
+                    if(sel&1) mask|=0xFF; if(sel&2) mask|=0xFF00;
+                    if(sel&4) mask|=0xFF0000; if(sel&8) mask|=0xFF000000;
+                    vram[v_idx] = (vram[v_idx] & ~mask) | (ddat & mask);
+                }
+            }
+            else if (dadr == 0x80000000u) { 
+                if (dwe && !prev_dcyc) { 
+                    if(tx_idx < 65535) uart_tx[tx_idx++] = (char)(ddat & 0xFF); 
+                } 
+            }
+            else if (dadr == 0x80000004u) { 
+                if (!dwe) {
+                    if (!prev_dcyc) { latched_rx = uart_rx; uart_rx = -1; }
+                    dut.p_dbus__rdt.data[0] = latched_rx; 
+                } 
+            }
+            else if (dadr == 0x80000008u) { 
+                if (!dwe) dut.p_dbus__rdt.data[0] = buttons; 
+            }
+            else {
+                uint32_t idx = (dadr>>2) & 0x3FFF;
+                if(dwe) {
+                    uint32_t sel = dut.p_dbus__sel.data[0];
+                    uint32_t mask = 0;
+                    if(sel&1) mask|=0xFF; if(sel&2) mask|=0xFF00;
+                    if(sel&4) mask|=0xFF0000; if(sel&8) mask|=0xFF000000;
+                    ram[idx] = (ram[idx] & ~mask) | (ddat & mask);
+                } else {
+                    dut.p_dbus__rdt.data[0] = ram[idx];
+                }
+            }
+            dut.p_dbus__ack.data[0] = 1;
+        } else {
+            dut.p_dbus__ack.data[0] = 0;
+        }
+        
+        prev_dcyc = dcyc; 
+        dut.p_clk.data[0] = 1; dut.step();
+        dut.p_ibus__ack.data[0] = 0; dut.p_dbus__ack.data[0] = 0;
+    }
+}`;
+
+// ── VIRTUAL CONSOLE LOGIC ──────────────────────────────────────────────────
+let imgData = null;
+let last_tx = 0;
+
+function updateOutputs() {
+    if(!cpu) return;
+    if(imgData) ctx.putImageData(imgData, 0, 0);
+    refreshMemoryGrid();
+    refreshRegisters();
+
+    let tx_now = cpu.read_tx_idx();
+    while (last_tx < tx_now) {
+        term.textContent += String.fromCharCode(cpu.read_tx_char(last_tx++));
+        term.scrollTop = term.scrollHeight; 
+    }
+}
+
+async function runSoC() {
+    runSpeed = 0;
+    bootBtn.disabled = true;
+    term.textContent = "[SYSTEM] Parsing Assembly Code...\n";
+    initMemoryGrid();
+    initRegisters();
+
+    let compiledWords = [];
+    try {
+        const sourceCode = document.getElementById('editor').value;
+        compiledWords = ASM(sourceCode.split('\n'));
+        term.textContent += `[SYSTEM] Compiled successfully.\n`;
+    } catch (e) {
+        term.textContent += `\n[ASSEMBLER FATAL] \n${e.message}\n`;
+        bootBtn.disabled = false;
+        return;
+    }
+
+    try {
+        term.textContent += "[BIOS] Fetching SERV RTL...\n";
+        const files = ['serv_alu.v','serv_bufreg.v','serv_bufreg2.v','serv_csr.v','serv_ctrl.v','serv_decode.v','serv_immdec.v','serv_mem_if.v','serv_rf_if.v','serv_rf_ram.v','serv_rf_top.v','serv_state.v','serv_top.v','serv_aligner.v','serv_compdec.v','serv_debug.v','serv_rf_ram_if.v'];
+        const vfs = {'input.v': 'module zero_soc(input clk, rst_n, output [31:0] ibus_adr, output ibus_cyc, input [31:0] ibus_rdt, input ibus_ack, output [31:0] dbus_adr, output [31:0] dbus_dat, output [3:0] dbus_sel, output dbus_we, output dbus_cyc, input [31:0] dbus_rdt, input dbus_ack); serv_rf_top cpu(.clk(clk),.i_rst(~rst_n),.o_ibus_adr(ibus_adr),.o_ibus_cyc(ibus_cyc),.i_ibus_rdt(ibus_rdt),.i_ibus_ack(ibus_ack),.o_dbus_adr(dbus_adr),.o_dbus_dat(dbus_dat),.o_dbus_sel(dbus_sel),.o_dbus_we(dbus_we),.o_dbus_cyc(dbus_cyc),.i_dbus_rdt(dbus_rdt),.i_dbus_ack(dbus_ack)); endmodule'};
+        for (let f of files) vfs[f] = await (await fetch(`https://cdn.jsdelivr.net/gh/olofk/serv@main/rtl/${f}`)).text();
+
+        term.textContent += "[BIOS] Synthesizing Hardware...\n";
+        const yOut = await runYosys(['-p', 'read_verilog -sv *.v; prep -top zero_soc; write_cxxrtl sim.cpp'], vfs);
+        const toStr = v => v instanceof Uint8Array ? new TextDecoder().decode(v) : v;
+        const simCpp = toStr(yOut['sim.cpp']);
+
+        term.textContent += "[BIOS] Compiling to WebAssembly...\n";
+        const hRes = await fetch('https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h');
+        const cOut = await runClang(['clang++','-O3','-I/','--target=wasm32','-nostdlib','-fno-exceptions','-fno-rtti','-Wl,--no-entry','driver.cpp','-o','sim.wasm'], 
+            {'driver.cpp': DRIVER_CPP, 'sim.cpp': simCpp, 'cxxrtl': {'cxxrtl.h': await hRes.text()}});
+
+        const { instance } = await WebAssembly.instantiate(cOut['sim.wasm'], {});
+        cpu = instance.exports;
+
+        cpu.init();
+        compiledWords.forEach((w, i) => cpu.load(i, w));
+        term.textContent += "[SYSTEM] Hardware Booted. Console Ready.\n-------------------------------------------------\n";
+        uartInput.disabled = false;
+        
+        document.querySelectorAll('.sim-ctrl').forEach(b => b.disabled = false);
+
+        const vramPtr = cpu.get_vram();
+        const vramArray = new Uint8ClampedArray(instance.exports.memory.buffer, vramPtr, 240 * 160 * 4);
+        imgData = new ImageData(vramArray, 240, 160);
+
+        // UART Input binding
+        uartInput.addEventListener('keydown', (e) => {
+            if(e.key.length === 1) { cpu.send_rx(e.key.charCodeAt(0)); e.preventDefault(); }
+            else if (e.key === 'Enter') { cpu.send_rx(10); e.preventDefault(); }
+            else if (e.key === 'Backspace') { cpu.send_rx(8); e.preventDefault(); }
+        });
+
+        // Gamepad Input binding (Ignoring when user is typing in text areas/inputs)
+        let btnState = 0;
+        const keys = { ArrowRight: 1, ArrowLeft: 2, ArrowUp: 4, ArrowDown: 8, z: 16, x: 32, Enter: 64 };
+        
+        window.addEventListener('keydown', e => { 
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if(keys[e.key]) { 
+                btnState |= keys[e.key]; 
+                if(cpu) cpu.set_buttons(btnState); 
+                e.preventDefault(); 
+            } 
+        });
+        
+        window.addEventListener('keyup', e => { 
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+            if(keys[e.key]) { 
+                btnState &= ~keys[e.key]; 
+                if(cpu) cpu.set_buttons(btnState); 
+                e.preventDefault(); 
+            } 
+        });
+
+        runSpeed = 50000; // Start fast
+        updateOutputs();
+
+    } catch (e) {
+        term.textContent += `\n[FATAL] ${e.message}`;
+    } finally {
+        bootBtn.disabled = false;
+    }
+}
+
+// ── EXECUTION LOOP & CONTROLS ──────────────────────────────────────────────
+function tick() {
+    if (cpu && runSpeed > 0) {
+        for (let i = 0; i < runSpeed; i++) cpu.step();
+        updateOutputs();
+    }
+    requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+bootBtn.onclick = runSoC;
+document.getElementById('btnFast').onclick = () => runSpeed = 50000;
+document.getElementById('btnSlow').onclick = () => runSpeed = 200;
+document.getElementById('btnPause').onclick = () => runSpeed = 0;
+
+document.getElementById('btnTickCyc').onclick = () => {
+    runSpeed = 0; 
+    if(cpu) { cpu.step(); updateOutputs(); }
+};
+
+document.getElementById('btnTickInst').onclick = () => {
+    runSpeed = 0; 
+    if(!cpu) return;
+    
+    // Step minimum instruction cost first (bit-serial SERV)
+    for(let i = 0; i < 35; i++) cpu.step();
+    
+    // Then wait for PC to actually change
+    const start_pc = cpu.get_pc() >>> 0;
+    let extra = 0;
+    while((cpu.get_pc() >>> 0) === start_pc && extra < 100) {
+        cpu.step(); 
+        extra++;
+    }
+    
+    updateOutputs();
+};
+
+initMemoryGrid();
+initRegisters();
+</script>
+</body>
+</html>
