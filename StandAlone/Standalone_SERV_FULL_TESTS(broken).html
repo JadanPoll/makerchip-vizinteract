@@ -33,6 +33,7 @@
     <div>
         <button id="buildBtn" class="run-all">▶ Fetch, Synth &amp; Run THE GAUNTLET</button>
         <button id="traceBtn" class="trace-btn" disabled>🐛 Run Diagnostic Trace</button>
+        <button id="timingBtn" class="trace-btn" disabled>⏱ Run Cycle Characterization</button>
     </div>
     
     <div class="dashboard">
@@ -167,6 +168,252 @@ const ASM = (() => {
 })();
 
 function mem(cpu, idx) { return cpu.read_mem(idx) >>> 0; }
+
+
+// ── CHARACTERIZATION SUITE HELPERS ──────────────────────────────────────────
+function parse_fetches(len, cpu) {
+    const fetches = [];
+    for(let i = 0; i < len; i += 6) {
+        const cyc  = cpu.get_trace_word(i);
+        const iadr = cpu.get_trace_word(i+1);
+        const dadr = cpu.get_trace_word(i+3);
+        
+        if(iadr !== 0xFFFFFFFF) {
+            fetches.push({ cyc, iadr, dbus_cyc: dadr !== 0xFFFFFFFF });
+        } else if (dadr !== 0xFFFFFFFF && fetches.length > 0) {
+            fetches[fetches.length-1].dbus_cyc = true;
+        }
+    }
+    return fetches;
+}
+
+function measure_timing(results_array, instruction, fetches, start_adr, end_adr, notes = "") {
+    let start_idx = fetches.findIndex(f => f.iadr === start_adr);
+    if (start_idx === -1) return; 
+
+    let end_idx = fetches.findIndex((f, i) => i > start_idx && f.iadr === end_adr);
+    if (end_idx === -1) return;
+
+    const delta = fetches[end_idx].cyc - fetches[start_idx].cyc;
+    const dbus_activity = fetches.slice(start_idx, end_idx).some(f => f.dbus_cyc) ? "Yes" : "No";
+    
+    results_array.push({
+        "Instruction": instruction,
+        "Cycles": delta,
+        "DBUS": dbus_activity,
+        "Notes": notes || `0x${start_adr.toString(16)} -> 0x${end_adr.toString(16)}`
+    });
+}
+
+const TIMING_TESTS = [
+    {
+        name: "TIMING: Baseline ALU (Single-stage, Shifts, Compare)",
+        asm: [
+            "addi a0,zero,1",     // byte 0
+            "add a1,a0,a0",       // byte 4
+            "sub a2,a1,a0",       // byte 8
+            "xor a3,a1,a2",       // byte 12
+            "slli a4,a0,1",       // byte 16
+            "slli a4,a0,16",      // byte 20
+            "slli a4,a0,31",      // byte 24
+            "slt a5,zero,a0",     // byte 28
+            "j halt",             // byte 32
+            "halt:", "j halt"     // byte 36
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(10000), cpu);
+            const results = [];
+            measure_timing(results, "addi", fetches, 0, 4);
+            measure_timing(results, "add", fetches, 4, 8);
+            measure_timing(results, "sub", fetches, 8, 12);
+            measure_timing(results, "xor", fetches, 12, 16);
+            measure_timing(results, "slli (by 1)", fetches, 16, 20);
+            measure_timing(results, "slli (by 16)", fetches, 20, 24);
+            measure_timing(results, "slli (by 31)", fetches, 24, 28);
+            measure_timing(results, "slt", fetches, 28, 32);
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Memory Accesses (Load/Store)",
+        asm: [
+            "addi a0,zero,256",   // byte 0
+            "sw a0,0(a0)",        // byte 4
+            "sh a0,0(a0)",        // byte 8
+            "sb a0,0(a0)",        // byte 12
+            "lw a1,0(a0)",        // byte 16
+            "lh a1,0(a0)",        // byte 20
+            "lb a1,0(a0)",        // byte 24
+            "j halt",             // byte 28
+            "halt:", "j halt"     // byte 32
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(10000), cpu);
+            const results = [];
+            measure_timing(results, "sw (Word)", fetches, 4, 8);
+            measure_timing(results, "sh (Half)", fetches, 8, 12);
+            measure_timing(results, "sb (Byte)", fetches, 12, 16);
+            measure_timing(results, "lw (Word)", fetches, 16, 20);
+            measure_timing(results, "lh (Half)", fetches, 20, 24);
+            measure_timing(results, "lb (Byte)", fetches, 24, 28);
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Control Flow (Branches and Jumps)",
+        asm: [
+            "addi a0,zero,1",     // byte 0
+            "beq a0,zero,skip",   // byte 4  -> Target: 16 (Not taken)
+            "nop",                // byte 8
+            "beq a0,a0,taken",    // byte 12 -> Target: 24 (Taken)
+            "skip: nop",          // byte 16
+            "nop",                // byte 20
+            "taken: jal ra,tgt",  // byte 24 -> Target: 36 (ra=28)
+            "ret_target: j halt", // byte 28 -> Target: 44
+            "nop",                // byte 32
+            "tgt: jalr zero,ra,0",// byte 36 -> Target: 28 (from ra)
+            "nop",                // byte 40
+            "halt: j halt"        // byte 44
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(10000), cpu);
+            const results = [];
+            measure_timing(results, "Branch (Not Taken)", fetches, 4, 8, "beq a0,zero");
+            measure_timing(results, "Branch (Taken)", fetches, 12, 24, "beq a0,a0");
+            measure_timing(results, "JAL", fetches, 24, 36, "jal ra,tgt");
+            measure_timing(results, "JALR", fetches, 36, 28, "jalr zero,ra,0");
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Immediates and CSRs",
+        asm: [
+            "lui a0,0x12345",     // byte 0
+            "auipc a1,0",         // byte 4
+            "csrrw zero,0x305,a0",// byte 8  (mtvec)
+            "csrr a2,0x305",      // byte 12 (mtvec)
+            "csrrsi zero,0x300,8",// byte 16 (mstatus)
+            "csrr a3,0x300",      // byte 20 (mstatus)
+            "csrrwi zero,0x340,11",// byte 24 (mscratch)
+            "j halt",             // byte 28
+            "halt:", "j halt"     // byte 32
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(10000), cpu);
+            const results = [];
+            measure_timing(results, "LUI", fetches, 0, 4);
+            measure_timing(results, "AUIPC", fetches, 4, 8);
+            measure_timing(results, "CSRRW (RF-backed)", fetches, 8, 12, "mtvec write");
+            measure_timing(results, "CSRR (RF-backed)", fetches, 12, 16, "mtvec read");
+            measure_timing(results, "CSRRSI (FF-backed)", fetches, 16, 20, "mstatus set");
+            measure_timing(results, "CSRR (FF-backed)", fetches, 20, 24, "mstatus read");
+            measure_timing(results, "CSRRWI (Immediate)", fetches, 24, 28, "mscratch write");
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Trap - ECALL Entry and MRET",
+        asm: [
+            "addi a0,zero,20", "csrrw zero,0x305,a0", // byte 0, 4 (mtvec=20)
+            "ecall",              // byte 8 (Traps to 20)
+            "j halt",             // byte 12 (MRET lands here)
+            "nop",                // byte 16
+            "handler:",           // byte 20
+            "addi a1,zero,12", "csrrw zero,0x341,a1", // byte 20, 24 (mepc=12)
+            "mret",               // byte 28 (Returns to 12)
+            "halt: j halt"        // byte 32
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(15000), cpu);
+            const results = [];
+            measure_timing(results, "ECALL Trap Entry", fetches, 8, 20, "ecall -> handler");
+            measure_timing(results, "MRET Return", fetches, 28, 12, "mret -> instruction");
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Trap - EBREAK Entry",
+        asm: [
+            "addi a0,zero,20", "csrrw zero,0x305,a0", // byte 0, 4 (mtvec=20)
+            "ebreak",             // byte 8 (Traps to 20)
+            "j halt",             // byte 12 (MRET lands here)
+            "nop",                // byte 16
+            "handler:",           // byte 20
+            "addi a1,zero,12", "csrrw zero,0x341,a1", // byte 20, 24 (mepc=12)
+            "mret",               // byte 28
+            "halt: j halt"        // byte 32
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(15000), cpu);
+            const results = [];
+            measure_timing(results, "EBREAK Trap Entry", fetches, 8, 20, "ebreak -> handler");
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Trap - Misaligned Memory Access",
+        asm: [
+            "addi a0,zero,24", "csrrw zero,0x305,a0", // byte 0, 4 (mtvec=24)
+            "addi a1,zero,257",   // byte 8
+            "lh a2,0(a1)",        // byte 12 (Traps to 24)
+            "j halt",             // byte 16 (MRET lands here)
+            "nop",                // byte 20
+            "handler:",           // byte 24
+            "addi a1,zero,16", "csrrw zero,0x341,a1", // byte 24, 28 (mepc=16)
+            "mret",               // byte 32
+            "halt: j halt"        // byte 36
+        ],
+        verify(cpu) {
+            const fetches = parse_fetches(cpu.run_traced(15000), cpu);
+            const results = [];
+            measure_timing(results, "Misaligned Trap Entry", fetches, 12, 24, "lh (odd adr) -> handler");
+            window.TIMING_RESULTS.push(...results);
+            return true;
+        }
+    },
+    {
+        name: "TIMING: Trap - Timer IRQ Latency",
+        asm: [
+            "addi a0,zero,28", "csrrw zero,0x305,a0",  // byte 0, 4 (mtvec=28)
+            "csrrsi zero,0x300,8",                     // byte 8 (MIE=1)
+            "addi t0,zero,128", "csrrw zero,0x304,t0", // byte 12, 16 (MTIE=1)
+            "wait: j wait",                            // byte 20 (Infinite loop until IRQ)
+            "nop",                                     // byte 24
+            "handler:",                                // byte 28
+            "addi a1,zero,42", "sw a1,256(zero)",      // byte 28, 32
+            "halt: j halt"                             // byte 36
+        ],
+        verify(cpu) {
+            const trace_length = cpu.run_traced_with_timer_irq(150, 15000);
+            const fetches = parse_fetches(trace_length, cpu);
+            const results = [];
+
+            const handler_idx = fetches.findIndex(f => f.iadr === 28);
+            const last_wait_idx = fetches.slice(0, handler_idx).reduce((last, f, i) => 
+                f.iadr === 20 ? i : last, -1);
+
+            if(last_wait_idx !== -1 && handler_idx !== -1) {
+                const delta = fetches[handler_idx].cyc - fetches[last_wait_idx].cyc;
+                const dbus_activity = fetches.slice(last_wait_idx, handler_idx).some(f => f.dbus_cyc) ? "Yes" : "No";
+                
+                results.push({
+                    "Instruction": "Timer IRQ Entry",
+                    "Cycles": delta,
+                    "DBUS": dbus_activity,
+                    "Notes": "last wait fetch -> handler"
+                });
+            }
+            window.TIMING_RESULTS.push(...results);
+            return mem(cpu, 64) === 42; 
+        }
+    }
+];
 
 // ── FULL TEST SUITE (125+ ASSERTIONS) ────────────────────────────────────────
 const TESTS = [
@@ -1691,7 +1938,7 @@ static void bus_tick_traced(int timer_irq_val, int c, bool do_trace) {
     if(icyc) {
         uint32_t inst = ram[(iadr>>2)&0xFFF];
         if(inst == 0x00100073u) {
-            if (halted == 0) halted = 400;
+            if (halted == 0) halted = 400; // constraints: To be Cycle accurate needs to be 106 >, using 400
         }
         dut.p_ibus__rdt.data[0] = inst;
         dut.p_ibus__ack.data[0] = 1;
@@ -1786,7 +2033,21 @@ extern "C" {
         }
         return c;
     }
-
+__attribute__((export_name("run_traced_with_timer_irq")))
+    int run_traced_with_timer_irq(int assert_at, int ncycles) {
+        trace_len = 0;
+        int c = 0;
+        while(c < ncycles && halted != 1) {
+            // Assert timer IRQ if current cycle is >= assert_at
+            bus_tick_traced(c >= assert_at ? 1 : 0, c, true);
+            
+            // Standard EBREAK halt countdown
+            if(halted > 1) halted--;
+            c++;
+        }
+        return trace_len;
+    }
+    
     __attribute__((export_name("run_reset_check"))) uint32_t run_reset_check() {
         dut.reset();
         for(size_t i = 0; i < 576; i++){
@@ -2019,7 +2280,7 @@ async function runSuite() {
 
         wasmBinary = cOut['sim.wasm'];
         traceBtn.disabled = false;
-
+document.getElementById('timingBtn').disabled = false;
         log(`\nWasm ready. Running ${TESTS.length} tests...\n`, '#69db7c');
 
         console.groupCollapsed('ASM Sanity Check');
@@ -2122,9 +2383,42 @@ async function runSuite() {
         document.getElementById('buildBtn').disabled = false;
     }
 }
+async function runTimingCharacterization() {
+    if (!wasmBinary) return;
+    log('\n── RUNNING TIMING CHARACTERIZATION ──', '#d4aa00');
+    console.group('⏱ CYCLE TIMING PROFILES');
+    
+    // Initialize the global results array
+    window.TIMING_RESULTS = [];
+    let passed = 0;
 
+    try {
+        for (let i = 0; i < TIMING_TESTS.length; i++) {
+            const { instance } = await WebAssembly.instantiate(wasmBinary, { env: new Proxy({}, { get: () => () => 0 }) });
+            const cpu = instance.exports;
+            if (cpu.__wasm_call_ctors) cpu.__wasm_call_ctors();
+            
+            const t = TIMING_TESTS[i];
+            const words = ASM(t.asm);
+            cpu.init_cpu();
+            words.forEach((w, idx) => cpu.load_inst(idx, w));
+            
+            if (t.verify(cpu)) passed++;
+        }
+        console.log(`Characterization complete. ${passed}/${TIMING_TESTS.length} suites executed.`);
+        if (window.TIMING_RESULTS.length > 0) {
+            console.table(window.TIMING_RESULTS);
+            log(`Timing characterization complete! Check browser console (F12) for the table.`, '#69db7c');
+        }
+    } catch(e) {
+        console.error(`Timing Error:`, e);
+        log(`Timing Error: ${e.message}`, '#f97171');
+    }
+    console.groupEnd();
+}
 document.getElementById('buildBtn').onclick = runSuite;
 traceBtn.onclick = runDiagnosticTrace;
+document.getElementById('timingBtn').onclick = runTimingCharacterization;
 buildUI();
 </script>
 </body>
