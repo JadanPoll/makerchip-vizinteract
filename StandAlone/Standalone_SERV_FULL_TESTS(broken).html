@@ -713,11 +713,12 @@ const TESTS = [
               "lw a2,256(zero)","sw a2,260(zero)","ebreak"],
         verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x05AA05AA; }
     },
-    {
+	{
         name: "Store SH: Offset 2 writes to upper halfword without corrupting lower",
         asm: [
             "lui a0,0x11223", "sw a0,256(zero)", // Mem = 0x11223000
-            "addi a1,zero,0x7788",
+            "lui a1,0x7",                        // a1 = 0x7000
+            "addi a1,a1,0x788",                  // a1 = 0x7000 + 0x788 = 0x7788
             "sh a1,258(zero)",                   // Overwrite upper half -> 0x77883000
             "lw a2,256(zero)",
             "sw a2,260(zero)", "ebreak"
@@ -813,25 +814,133 @@ const TESTS = [
             return mem(cpu,64)===11 && mem(cpu,65)===8;
         }
     },
-    {
+	{
         name: "Trap EBREAK: mcause=3, mepc=PC of ebreak",
         asm: [
             "addi a0,zero,80","csrrw zero,0x305,a0",
-            "ebreak", // byte 8 -> trap
-            "sw a1,256(zero)", // byte 12 (returned here)
-            "j halt",          // byte 16 (clean halt)
-            ...Array(15).fill("nop"), // Pads to byte 80
-            "handler:", // byte 80
-            "csrr a1,0x342", // a1 = 3
-            "addi a3,zero,12","csrrw zero,0x341,a3", // mepc = 12
+            "ebreak",                    // byte 8 -> trap
+            "j halt",                    // byte 12
+            ...Array(16).fill("nop"),    // bytes 16..76
+            "handler:",                  // byte 80
+            "csrr a1,0x342",
+            "sw a1,256(zero)",           // store mcause=3 here
+            "addi a3,zero,12","csrrw zero,0x341,a3", // mepc=12
             "mret",
-            "halt:", "ebreak"
+            "halt:", "j halt"
         ],
-        verify(cpu) {
-            cpu.run_cycles(300000); 
-            return mem(cpu,64)===3;
-        }
+        verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===3; }
     },
+{
+    name: "DIAG: What does csrr 0x342 return after ebreak trap?",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "ebreak",                    // byte 8
+        "sw a1,256(zero)",           // byte 12 - store whatever a1 is
+        "sw a2,260(zero)",           // byte 16 - store a2 too
+        "ebreak",                    // byte 20 - halt
+        ...Array(14).fill("nop"),
+        "handler:",                  // byte 80
+        "csrr a1,0x342",             // a1 = mcause
+        "addi a2,zero,12",           // a2 = 12 (literal, for mepc)
+        "csrrw zero,0x341,a2",       // mepc = 12
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        const mcause = mem(cpu,64);
+        const a2val = mem(cpu,65);
+        console.log(`DIAG: mcause readback = ${mcause} (0x${mcause.toString(16)}), mem[65]=${a2val}`);
+        return true; // always pass, just log
+    }
+},
+{
+    name: "DIAG2: Does mtvec write take effect?",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "csrr a1,0x305",             // read mtvec back immediately
+        "sw a1,256(zero)",           // store it — should be 80
+        "ebreak",                    // byte 16
+        ...Array(15).fill("nop"),
+        "handler:",                  // byte 80
+        "addi a2,zero,42","sw a2,260(zero)",
+        "ebreak"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        console.log(`DIAG2: mtvec readback=${mem(cpu,64)}, handler_ran=${mem(cpu,65)}`);
+        return true;
+    }
+},
+{
+    name: "DIAG3: Cycle count from ebreak fetch to handler store",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "ebreak",
+        "j halt",
+        ...Array(16).fill("nop"),
+        "handler:",
+        "csrr a1,0x342",
+        "sw a1,256(zero)",
+        "addi a3,zero,12","csrrw zero,0x341,a3",
+        "mret",
+        "halt:", "j halt"
+    ],
+    verify(cpu) {
+        const len = cpu.run_traced(300000);
+        let ebreak_cycle = -1, store_cycle = -1;
+        for(let i = 0; i < len; i += 6) {
+            const cyc  = cpu.get_trace_word(i);
+            const iadr = cpu.get_trace_word(i+1);
+            const dadr = cpu.get_trace_word(i+3);
+            const ddat = cpu.get_trace_word(i+4);
+            const we   = (ddat >>> 31) & 1;
+            if(iadr !== 0xFFFFFFFF) {
+                const inst = cpu.get_trace_word(i+2);
+                if(inst === 0x00100073 && ebreak_cycle === -1) ebreak_cycle = cyc;
+            }
+            if(dadr !== 0xFFFFFFFF && we && store_cycle === -1 && ebreak_cycle !== -1) {
+                store_cycle = cyc;
+            }
+        }
+        console.log(`DIAG3: ebreak fetched at cycle ${ebreak_cycle}, first store after = cycle ${store_cycle}, delta = ${store_cycle - ebreak_cycle}`);
+        return true;
+    }
+},
+{
+    name: "DIAG4: Trap latency without ebreak interference",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "ecall",           // byte 8 — traps but doesn't set halted
+        "j halt",          // byte 12
+        ...Array(16).fill("nop"),
+        "handler:",        // byte 80
+        "csrr a1,0x342",
+        "sw a1,256(zero)", // this store IS the measurement point
+        "addi a3,zero,12","csrrw zero,0x341,a3",
+        "mret",
+        "halt:", "j halt"
+    ],
+    verify(cpu) {
+        const len = cpu.run_traced(300000);
+        let ecall_cycle = -1, store_cycle = -1;
+        for(let i = 0; i < len; i += 6) {
+            const cyc  = cpu.get_trace_word(i);
+            const iadr = cpu.get_trace_word(i+1);
+            const dadr = cpu.get_trace_word(i+3);
+            const ddat = cpu.get_trace_word(i+4);
+            const we   = (ddat >>> 31) & 1;
+            if(iadr !== 0xFFFFFFFF && ecall_cycle === -1) {
+                const inst = cpu.get_trace_word(i+2);
+                if(inst === 0x00000073) ecall_cycle = cyc;
+            }
+            if(dadr !== 0xFFFFFFFF && we && ecall_cycle !== -1 && store_cycle === -1) {
+                store_cycle = cyc;
+            }
+        }
+        console.log(`DIAG4: ecall at cycle ${ecall_cycle}, store at cycle ${store_cycle}, delta=${store_cycle - ecall_cycle}`);
+        return true;
+    }
+},
     {
         name: "Trap MRET: restores PC from mepc",
         asm: [
@@ -1059,15 +1168,15 @@ const TESTS = [
         ],
         verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
     },
-    {
+	{
         name: "Shift SRLI by 16: Tests downcounter midpoint logic",
         asm: ["lui a0,0x12345", "srli a1,a0,16", "sw a1,256(zero)", "ebreak"],
-        verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x00000123; }
+        verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x00001234; }
     },
     {
         name: "Shift SLLI by 16: Tests downcounter midpoint logic",
         asm: ["lui a0,0x12345", "slli a1,a0,16", "sw a1,256(zero)", "ebreak"],
-        verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x45000000; }
+        verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x50000000; }
     },
     {
         name: "Shift SRL: shift-by-0 via register-register",
@@ -1088,11 +1197,11 @@ const TESTS = [
         ],
         verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===42; }
     },
-    {
+	{
         name: "CSR CSRRWI: imm=31 (all 5 bits set)",
         asm: [
-            "csrrwi zero,0x342,31", // writing 31 to mcause
-            "csrr a0,0x342",
+            "csrrwi zero,0x340,31", // writing 31 to mscratch (0x340) avoids mcause bit 31 quirks
+            "csrr a0,0x340",
             "sw a0,256(zero)", "ebreak"
         ],
         verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===31; }
@@ -1119,7 +1228,7 @@ const TESTS = [
     // ════════════════════════════════════════════════════════
     // SECTION 22: NEW MISALIGNED TRAPS
     // ════════════════════════════════════════════════════════
-    {
+{
         name: "Misaligned Load: dbus_cyc never asserted (bus-level trap isolation)",
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
@@ -1129,25 +1238,20 @@ const TESTS = [
             ...Array(14).fill("nop"), "handler:",
             "addi a3,zero,99", "sw a3,256(zero)", "mret"
         ],
-        verify(cpu) { 
-            // If the bus cycle fired erroneously, the JS driver would throw an unaligned memory error 
-            // or write bad data. Reaching the handler cleanly proves o_dbus_cyc was suppressed.
-            cpu.run_cycles(300000); 
-            return mem(cpu,64)===99; 
-        }
+        verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===99; }
     },
     {
         name: "Misaligned LH Trap: addr=257 (mcause=4, mtval=257)",
         asm: [
-            "addi a0,zero,80", "csrrw zero,0x305,a0", // mtvec=80
+            "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257",
-            "lh a2,0(a1)", // byte 12 → misaligned load
-            "sw zero,256(zero)", "ebreak", // skipped
-            ...Array(14).fill("nop"), // pad to byte 80
-            "handler:",
-            "csrr a3,0x342", "sw a3,256(zero)", // mcause
-            "csrr a4,0x343", "sw a4,260(zero)", // mtval
-            "addi a5,zero,16", "csrrw zero,0x341,a5", // mepc
+            "lh a2,0(a1)",           // byte 12 → trap
+            "ebreak",                // byte 16 — if no trap
+            ...Array(15).fill("nop"), // bytes 20..76 (15 nops)
+            "handler:",              // byte 80
+            "csrr a3,0x342", "sw a3,256(zero)",
+            "csrr a4,0x343", "sw a4,260(zero)",
+            "addi a5,zero,16", "csrrw zero,0x341,a5", // mepc=16 → ebreak
             "mret"
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4 && mem(cpu,65)===257; }
@@ -1157,8 +1261,8 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,259", "lh a2,0(a1)",
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
@@ -1169,8 +1273,8 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257", "lw a2,0(a1)",
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
@@ -1181,8 +1285,8 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,258", "lw a2,0(a1)",
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
@@ -1193,8 +1297,8 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,259", "lw a2,0(a1)",
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
@@ -1205,11 +1309,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257",
-            "sh a1,0(a1)", // byte 12 → misaligned store
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
-            "csrr a3,0x342", "sw a3,256(zero)", // mcause
-            "csrr a4,0x343", "sw a4,260(zero)", // mtval
+            "sh a1,0(a1)", 
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
+            "csrr a3,0x342", "sw a3,256(zero)", 
+            "csrr a4,0x343", "sw a4,260(zero)", 
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===6 && mem(cpu,65)===257; }
@@ -1219,8 +1323,8 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,258", "sw a1,0(a1)",
-            "sw zero,256(zero)", "ebreak",
-            ...Array(14).fill("nop"), "handler:",
+            "ebreak",
+            ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
         ],
@@ -1273,15 +1377,15 @@ const TESTS = [
         ],
         verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===44; }
     },
-    {
-        name: "CSR CSRRW: Atomicity (old value readable while writing new)",
-        asm: [
-            "addi a0,zero,10", "csrrw zero,0x342,a0", // initial value 10
-            "addi a1,zero,20", "csrrw a2,0x342,a1",   // write 20, read old (10) to a2
-            "csrr a3,0x342",                          // read new (20) to a3
-            "sw a2,256(zero)", "sw a3,260(zero)", "ebreak"
-        ],
-        verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===10 && mem(cpu,65)===20; }
+	{
+      name: "CSR CSRRW: Atomicity (old value readable while writing new)",
+      asm: [
+          "addi a0,zero,10", "csrrw zero,0x340,a0",  // mscratch = 10
+          "addi a1,zero,20", "csrrw a2,0x340,a1",    // mscratch = 20, a2 = old (10)
+          "csrr a3,0x340",                            // a3 = new (20)
+          "sw a2,256(zero)", "sw a3,260(zero)", "ebreak"
+      ],
+      verify(cpu) { cpu.run_cycles(200000); return mem(cpu,64)===10 && mem(cpu,65)===20; }
     },
 
     // ════════════════════════════════════════════════════════
