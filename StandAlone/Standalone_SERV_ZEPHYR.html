@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SERV RISC-V — Zephyr Studio</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0d0f1a; color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        h2 { color: #9cdcfe; margin-top: 0; font-family: monospace; letter-spacing: 1px; }
+
+        .toolbar { display: flex; gap: 10px; width: 100%; max-width: 1200px; margin-bottom: 20px; flex-wrap: wrap; }
+        button { padding: 12px 20px; font-size: 0.95rem; background: #1565c0; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: background 0.2s; flex: 1; min-width: 150px; }
+        button:hover:not(:disabled) { background: #1e88e5; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-run  { background: #2e7d32; } .btn-run:hover:not(:disabled)  { background: #388e3c; }
+        .btn-load { background: #6a1b9a; } .btn-load:hover:not(:disabled) { background: #8e24aa; }
+        .btn-pause{ background: #b08d00; } .btn-pause:hover:not(:disabled){ background: #d4aa00; }
+
+        .console-container { display: flex; flex-wrap: wrap; gap: 20px; width: 100%; max-width: 1200px; }
+        .panel { background: #1e2030; border: 2px solid #2a3050; border-radius: 8px; padding: 15px; flex: 1 1 400px; box-sizing: border-box; }
+
+        #terminal { background: #000; height: 300px; overflow-y: auto; color: #69db7c; font-size: 1rem; font-family: monospace; white-space: pre-wrap; padding: 10px; border-radius: 4px; box-shadow: inset 0 0 10px rgba(0,0,0,0.8); }
+        #uartInput { width: 100%; background: #111; border: 1px solid #444; color: #69db7c; padding: 8px; font-family: monospace; margin-top: 10px; box-sizing: border-box; outline: none; }
+
+        .reg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 4px; background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.85rem; }
+        .reg-cell { display: flex; justify-content: space-between; background: #0d0f1a; padding: 4px 8px; border: 1px solid #2a3050; border-radius: 3px; }
+        .reg-name { color: #569cd6; font-weight: bold; }
+        .reg-val   { color: #dcdcaa; }
+
+        .mem-toolbar { display: flex; gap: 10px; margin-bottom: 10px; align-items: center; font-family: monospace; font-size: 0.9rem; }
+        .mem-toolbar input { background: #0d0f1a; border: 1px solid #444; color: #9cdcfe; padding: 6px; border-radius: 4px; font-family: monospace; width: 140px; }
+        .mem-grid { background: #111; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 0.9rem; }
+        .mem-row  { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; }
+        .mem-addr { color: #888; width: 100px; }
+        .mem-cell { background: #0d0f1a; color: #ce9178; border: 1px solid #2a3050; padding: 4px; width: 80px; text-align: center; border-radius: 3px; font-family: monospace; transition: all 0.2s; }
+        .mem-cell:focus { outline: none; border-color: #69db7c; color: #69db7c; background: #000; }
+
+        #loadBinInput { display: none; }
+        .mtime-display { font-family: monospace; font-size: 0.85rem; color: #9cdcfe; margin-top: 8px; }
+        .map-legend { font-family: monospace; font-size: 0.8rem; color: #888; line-height: 1.8; }
+        .map-legend span { color: #ce9178; }
+    </style>
+</head>
+<body>
+    <h2>🛠️ SERV RISC-V: Zephyr Hardware Studio</h2>
+
+    <div class="toolbar">
+        <button id="bootBtn" class="btn-run">▶ Synthesize & Boot SoC</button>
+        <button id="loadBinBtn" class="btn-load">📂 Load Binary (.bin)</button>
+        <input type="file" id="loadBinInput" accept=".bin,.elf">
+        <button id="btnFast"  class="sim-ctrl" disabled>⏩ Fast Run</button>
+        <button id="btnSlow"  class="sim-ctrl" disabled>▶ Slow Run</button>
+        <button id="btnPause" class="sim-ctrl btn-pause" disabled>⏸ Pause</button>
+        <button id="btnTickInst" class="sim-ctrl" disabled>⏭ Step Inst</button>
+        <button id="btnTickCyc" class="sim-ctrl"  disabled>⏭ Tick Cycle</button>
+    </div>
+
+    <div class="console-container">
+
+        <div class="panel" style="flex-basis: 100%;">
+            <h3 style="margin-top:0; color:#ce9178;">UART Terminal — NS16550 @ 0x10000000</h3>
+            <div id="terminal">_ System Offline...</div>
+            <input type="text" id="uartInput" placeholder="Type here to send bytes to UART RX..." disabled autocomplete="off" spellcheck="false">
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; color:#ce9178;">Live CPU Registers</h3>
+            <div class="reg-grid" id="regView"></div>
+            <div class="mtime-display" id="mtimeDisplay">mtime: 0x0000000000000000</div>
+        </div>
+
+        <div class="panel">
+            <h3 style="margin-top:0; color:#ce9178;">Memory Map</h3>
+            <div class="map-legend">
+                <span>0x00000000</span> – 0x0003FFFF &nbsp; ROM / Flash (256 KB, code)<br>
+                <span>0x02000000</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtime lo (alias)<br>
+                <span>0x02000004</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtime hi (alias)<br>
+                <span>0x0200bff8</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtime lo (CLINT)<br>
+                <span>0x0200bffc</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtime hi (CLINT)<br>
+                <span>0x02004000</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtimecmp lo<br>
+                <span>0x02004004</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; mtimecmp hi<br>
+                <span>0x10000000</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; NS16550 UART base<br>
+                <span>0x80000000</span> – 0x8003FFFF &nbsp; Data SRAM (256 KB)<br>
+                <span>0x90000000</span> – 0x9005FFFF &nbsp; VRAM (240×160 px, optional)
+            </div>
+        </div>
+
+        <div class="panel" style="flex-basis: 100%;">
+            <h3 style="margin-top:0; color:#ce9178;">Live Memory Inspector</h3>
+            <div class="mem-toolbar">
+                Go to address:
+                <input type="text" id="memBaseInput" value="0x00000000">
+                <span style="color:#888; font-size:0.8rem;">ROM: 0x00000000 | SRAM: 0x80000000 | mtime: 0x02000000 | UART: 0x10000000</span>
+            </div>
+            <div class="mem-grid" id="memView"></div>
+            <div style="color:#888; font-size:0.8rem; margin-top:6px;">Edit a cell and press Enter to hot-patch live memory.</div>
+        </div>
+
+    </div>
+
+<script type="module">
+import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+import { runClang } from 'https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js';
+
+const term       = document.getElementById('terminal');
+const bootBtn    = document.getElementById('bootBtn');
+const uartInput  = document.getElementById('uartInput');
+
+let cpu      = null;
+let wasmInst = null;
+let memBaseAddr = 0x00000000;
+let runSpeed    = 0;
+let last_tx     = 0;
+let diagCycleCount = 0;
+
+// ── C++ DRIVER ─────────────────────────────────────────────────────────────
+const DRIVER_CPP = `
+#include <cxxrtl/cxxrtl.h>
+#include "sim.cpp"
+
+static char heap[6291456];
+static size_t heap_top = 0;
+void* operator new(size_t n)  { heap_top=(heap_top+7)&~7u; void*p=&heap[heap_top]; heap_top+=n; return p; }
+void* operator new[](size_t n){ return operator new(n); }
+void operator delete(void*)           noexcept {}
+void operator delete[](void*)         noexcept {}
+void operator delete(void*,unsigned long) noexcept {}
+extern "C" {
+  int   __cxa_atexit(void(*)(void*),void*,void*){ return 0; }
+  void* __dso_handle = (void*)0;
+}
+
+cxxrtl_design::p_zero__soc dut;
+
+uint32_t rom[65536];    
+uint32_t sram[65536];   
+uint32_t vram[38400];   
+
+// UART
+char uart_tx[65536];
+int  tx_idx  = 0;
+int  uart_rx = -1;
+uint32_t uart_lcr = 0;
+
+// mtime / mtimecmp
+uint32_t mtime_lo    = 0;
+uint32_t mtime_hi    = 0;
+uint32_t mtimecmp_lo = 0xFFFFFFFFu;
+uint32_t mtimecmp_hi = 0xFFFFFFFFu;
+
+// Internal state
+int     prev_dcyc   = 0;
+uint32_t latched_rx  = 0xFFFFFFFFu;
+uint32_t current_pc  = 0;
+
+static inline void tick_mtime() {
+    uint64_t mt  = ((uint64_t)mtime_hi << 32) | mtime_lo;
+    uint64_t cmp = ((uint64_t)mtimecmp_hi << 32) | mtimecmp_lo;
+    mt++;
+    mtime_lo = (uint32_t)mt;
+    mtime_hi = (uint32_t)(mt >> 32);
+    dut.p_timer__irq.data[0] = (mt >= cmp) ? 1 : 0;
+}
+
+extern "C" {
+    __attribute__((export_name("init"))) void init() {
+        for(int i=0;i<65536;i++) rom[i]=sram[i]=0;
+        for(int i=0;i<38400;i++) vram[i]=0;
+        tx_idx=0; uart_rx=-1; prev_dcyc=0; current_pc=0;
+        uart_lcr=0;
+        mtime_lo=0; mtime_hi=0;
+        mtimecmp_lo=0xFFFFFFFFu; mtimecmp_hi=0xFFFFFFFFu;
+
+        dut.reset();
+        for(size_t i=0;i<576;i++)
+            dut.memory_p_cpu_2e_rf__ram_2e_memory.data[i]=cxxrtl::value<2>{0u};
+        dut.p_rst__n.data[0]=0;
+        dut.p_timer__irq.data[0] = 0;
+        for(int i=0;i<200;i++){ dut.p_clk.data[0]=0; dut.step(); dut.p_clk.data[0]=1; dut.step(); }
+        dut.p_rst__n.data[0]=1; dut.step();
+    }
+
+    __attribute__((export_name("load_rom")))  void load_rom(int i,  uint32_t w){ if(i<65536) rom[i]=w;  }
+    __attribute__((export_name("load_sram"))) void load_sram(int i, uint32_t w){ if(i<65536) sram[i]=w; }
+    __attribute__((export_name("get_vram")))     uint32_t* get_vram()    { return vram;   }
+    __attribute__((export_name("send_rx")))      void send_rx(int c)     { uart_rx=c;     }
+    __attribute__((export_name("read_tx_idx")))  int  read_tx_idx()      { return tx_idx; }
+    __attribute__((export_name("read_tx_char"))) char read_tx_char(int i){ return uart_tx[i]; }
+    __attribute__((export_name("get_pc")))  uint32_t get_pc()    { return current_pc; }
+    __attribute__((export_name("get_mtime_lo"))) uint32_t get_mtime_lo(){ return mtime_lo; }
+    __attribute__((export_name("get_mtime_hi"))) uint32_t get_mtime_hi(){ return mtime_hi; }
+
+    __attribute__((export_name("get_reg"))) uint32_t get_reg(int r) {
+        if(r==0) return 0;
+        uint32_t val=0;
+        int base=r*16;
+        for(int i=0;i<16;i++){
+            uint32_t chunk=dut.memory_p_cpu_2e_rf__ram_2e_memory.data[base+i].data[0]&3;
+            val|=(chunk<<(i*2));
+        }
+        return val;
+    }
+
+    __attribute__((export_name("get_rf_word"))) uint32_t get_rf_word(int i) {
+        if(i<0||i>=576) return 0xDEADBEEFu;
+        return dut.memory_p_cpu_2e_rf__ram_2e_memory.data[i].data[0] & 3;
+    }
+
+    __attribute__((export_name("get_rf_reg"))) uint32_t get_rf_reg(int r) {
+        uint32_t val=0;
+        int base=r*16;
+        for(int i=0;i<16;i++){
+            uint32_t chunk=dut.memory_p_cpu_2e_rf__ram_2e_memory.data[base+i].data[0]&3;
+            val|=(chunk<<(i*2));
+        }
+        return val;
+    }
+
+    __attribute__((export_name("get_mtvec"))) uint32_t get_mtvec() {
+        return get_rf_reg(33);
+    }
+
+    __attribute__((export_name("set_mtvec"))) void set_mtvec(uint32_t val) {
+        int base=33*16;
+        for(int i=0;i<16;i++){
+            uint32_t chunk=(val>>(i*2))&3;
+            dut.memory_p_cpu_2e_rf__ram_2e_memory.data[base+i]=cxxrtl::value<2>{chunk};
+        }
+    }
+
+    __attribute__((export_name("set_rf_reg"))) void set_rf_reg(int r, uint32_t val) {
+        int base=r*16;
+        for(int i=0;i<16;i++){
+            uint32_t chunk=(val>>(i*2))&3;
+            dut.memory_p_cpu_2e_rf__ram_2e_memory.data[base+i]=cxxrtl::value<2>{chunk};
+        }
+    }
+
+    __attribute__((export_name("debug_read"))) uint32_t debug_read(uint32_t addr) {
+        if(addr<0x00040000u) return rom[addr>>2];
+        if(addr==0x02000000u) return mtime_lo;
+        if(addr==0x02000004u) return mtime_hi;
+        if(addr==0x0200bff8u) return mtime_lo; // CLINT MTIME LO
+        if(addr==0x0200bffcu) return mtime_hi; // CLINT MTIME HI
+        if(addr==0x02004000u) return mtimecmp_lo;
+        if(addr==0x02004004u) return mtimecmp_hi;
+        if((addr&0xFFFFFFF0u)==0x10000000u){
+            if((addr&0xF)==0 && !(uart_lcr&0x80)) return uart_rx;
+            if((addr&0xF)==3) return uart_lcr;
+            if((addr&0xF)==5) return 0x60|(uart_rx!=-1?1:0);
+            return 0;
+        }
+        if(addr>=0x80000000u && addr<0x80040000u) return sram[(addr-0x80000000u)>>2];
+        if((addr&0xFF000000u)==0x90000000u){
+            uint32_t vi=(addr&0x00FFFFFFu)>>2;
+            if(vi<38400) return vram[vi];
+        }
+        return 0xDEADBEEFu;
+    }
+
+    __attribute__((export_name("debug_write"))) void debug_write(uint32_t addr, uint32_t val) {
+        if(addr<0x00040000u) { rom[addr>>2]=val; return; }
+        if(addr==0x02004000u){ mtimecmp_lo=val; return; }
+        if(addr==0x02004004u){ mtimecmp_hi=val; return; }
+        if((addr&0xFFFFFFF0u)==0x10000000u){
+            if((addr&0xF)==3) uart_lcr=(val&0xFF);
+            else if((addr&0xF)==0 && !(uart_lcr&0x80) && tx_idx<65535) uart_tx[tx_idx++]=(char)(val&0xFF);
+            else if((addr&0xF)==4) uart_rx=val;
+            return;
+        }
+        if(addr>=0x80000000u && addr<0x80040000u){ sram[(addr-0x80000000u)>>2]=val; return; }
+        if((addr&0xFF000000u)==0x90000000u){
+            uint32_t vi=(addr&0x00FFFFFFu)>>2;
+            if(vi<38400) vram[vi]=val;
+        }
+    }
+
+    __attribute__((export_name("step"))) void step() {
+        tick_mtime();
+        dut.p_clk.data[0]=0; dut.step();
+        if(dut.p_ibus__cyc.data[0]){
+            current_pc=dut.p_ibus__adr.data[0];
+            if(current_pc >= 0x80000000u)
+                dut.p_ibus__rdt.data[0]=sram[(current_pc>>2)&0xFFFF];
+            else
+                dut.p_ibus__rdt.data[0]=rom[(current_pc>>2)&0xFFFF];
+            dut.p_ibus__ack.data[0]=1;
+        }
+        uint32_t dcyc=dut.p_dbus__cyc.data[0];
+        if(dcyc){
+            uint32_t dadr=dut.p_dbus__adr.data[0];
+            uint32_t dwe =dut.p_dbus__we.data[0];
+            uint32_t ddat=dut.p_dbus__dat.data[0];
+            uint32_t sel =dut.p_dbus__sel.data[0];
+            auto byte_mask=[&]()->uint32_t{
+                uint32_t m=0;
+                if(sel&1) m|=0xFF; if(sel&2) m|=0xFF00; if(sel&4) m|=0xFF0000; if(sel&8) m|=0xFF000000;
+                return m;
+            };
+            if(dadr<0x00040000u){ if(!dwe) dut.p_dbus__rdt.data[0]=rom[dadr>>2]; }
+            else if(dadr==0x02000000u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_lo; }
+            else if(dadr==0x02000004u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_hi; }
+            else if(dadr==0x0200bff8u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_lo; } // CLINT MTIME LO
+            else if(dadr==0x0200bffcu){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_hi; } // CLINT MTIME HI
+            else if(dadr==0x02004000u){
+                if(dwe) mtimecmp_lo=(mtimecmp_lo & ~byte_mask())|(ddat & byte_mask());
+                else if(!dwe) dut.p_dbus__rdt.data[0]=mtimecmp_lo;
+            }
+            else if(dadr==0x02004004u){
+                if(dwe) mtimecmp_hi=(mtimecmp_hi & ~byte_mask())|(ddat & byte_mask());
+                else if(!dwe) dut.p_dbus__rdt.data[0]=mtimecmp_hi;
+            }
+            else if((dadr & 0xFFFFFFF0u)==0x10000000u){
+                // Reconstruct the true byte offset using Quirk #13 (dbus_sel)
+                uint32_t byte_offset = 0;
+                if (sel & 2) byte_offset = 1;
+                else if (sel & 4) byte_offset = 2;
+                else if (sel & 8) byte_offset = 3;
+                
+                uint32_t reg = (dadr & 0xF) + byte_offset;
+                
+                // Pre-extract the byte value from the correct lane for writes
+                uint32_t byte_val = (ddat >> (byte_offset * 8)) & 0xFF;
+
+                if(dwe && !prev_dcyc){
+                    if(reg==3) uart_lcr=byte_val;
+                    else if(reg==0 && !(uart_lcr&0x80)){ 
+                        if(tx_idx<65535) uart_tx[tx_idx++]=(char)byte_val; 
+                    }
+                } else if(!dwe){
+                    if(reg==0 && !(uart_lcr&0x80)){
+                        if(!prev_dcyc){ latched_rx=(uart_rx==-1)?0:uart_rx; uart_rx=-1; }
+                        uint32_t b=latched_rx&0xFF; dut.p_dbus__rdt.data[0]=b|(b<<8)|(b<<16)|(b<<24);
+                    }
+                    else if(reg==3){ 
+                        uint32_t v=uart_lcr; dut.p_dbus__rdt.data[0]=v|(v<<8)|(v<<16)|(v<<24); 
+                    }
+                    else if(reg==5){ 
+                        // Return 0x60 (THRE and TEMT bits set) duplicated across all lanes
+                        uint32_t lsr=0x60|(uart_rx!=-1?1:0); 
+                        dut.p_dbus__rdt.data[0]=lsr|(lsr<<8)|(lsr<<16)|(lsr<<24); 
+                    }
+                    else dut.p_dbus__rdt.data[0]=0;
+                }
+            }
+            else if((dadr&0xFF000000u)==0x90000000u){
+                uint32_t vi=(dadr&0x00FFFFFFu)>>2;
+                if(vi<38400){ if(dwe){ uint32_t m=byte_mask(); vram[vi]=(vram[vi]&~m)|(ddat&m); } else dut.p_dbus__rdt.data[0]=vram[vi]; }
+            }
+            else if(dadr>=0x80000000u && dadr<0x80040000u){
+                uint32_t idx=(dadr-0x80000000u)>>2;
+                if(dwe){ uint32_t m=byte_mask(); sram[idx]=(sram[idx]&~m)|(ddat&m); } else dut.p_dbus__rdt.data[0]=sram[idx];
+            }
+            dut.p_dbus__ack.data[0]=1;
+        } else { dut.p_dbus__ack.data[0]=0; }
+        prev_dcyc=dcyc;
+        dut.p_clk.data[0]=1; dut.step();
+        dut.p_ibus__ack.data[0]=0; dut.p_dbus__ack.data[0]=0;
+    }
+}
+`;
+
+// ── UI HELPERS ──────────────────────────────────────────────────────────
+const ABI = ["zero","ra","sp","gp","tp","t0","t1","t2","s0","s1","a0","a1","a2","a3","a4","a5","a6","a7","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","t3","t4","t5","t6"];
+function initRegisters() {
+    const v = document.getElementById('regView');
+    v.innerHTML = `<div class="reg-cell"><span class="reg-name">PC</span><span class="reg-val" id="reg-pc">00000000</span></div>`;
+    for(let i=0;i<32;i++) v.innerHTML += `<div class="reg-cell"><span class="reg-name">${ABI[i]}</span><span class="reg-val" id="reg-${i}">00000000</span></div>`;
+}
+function refreshRegisters() {
+    if(!cpu) return;
+    document.getElementById('reg-pc').textContent = (cpu.get_pc()>>>0).toString(16).padStart(8,'0');
+    for(let i=0;i<32;i++) document.getElementById(`reg-${i}`).textContent = (cpu.get_reg(i)>>>0).toString(16).padStart(8,'0');
+    const mtime = ((BigInt(cpu.get_mtime_hi()>>>0) << 32n) | BigInt(cpu.get_mtime_lo()>>>0)).toString(16).padStart(16,'0');
+    document.getElementById('mtimeDisplay').textContent = `mtime: 0x${mtime}`;
+}
+
+function initMemoryGrid() {
+    const view = document.getElementById('memView');
+    view.innerHTML = '';
+    for(let i=0;i<8;i++){
+        const row = document.createElement('div'); row.className = 'mem-row';
+        const addr = document.createElement('span'); addr.className = 'mem-addr'; addr.id = `mem-addr-${i}`;
+        row.appendChild(addr);
+        for(let j=0;j<4;j++){
+            const inp = document.createElement('input');
+            inp.className = 'mem-cell'; inp.id = `mem-cell-${i}-${j}`; inp.maxLength = 8;
+            inp.addEventListener('change', e => {
+                if(!cpu) return;
+                const a = (memBaseAddr + i*16 + j*4) >>> 0;
+                const v = parseInt(e.target.value, 16) >>> 0;
+                if(!isNaN(v)) cpu.debug_write(a, v);
+            });
+            inp.addEventListener('keydown', e => { if(e.key==='Enter') e.target.blur(); });
+            row.appendChild(inp);
+        }
+        view.appendChild(row);
+    }
+    document.getElementById('memBaseInput').addEventListener('change', e => {
+        let nb = parseInt(e.target.value, 16);
+        if(!isNaN(nb)) memBaseAddr = (nb & ~0xF) >>> 0;
+        e.target.value = `0x${memBaseAddr.toString(16).padStart(8,'0')}`;
+        refreshMemoryGrid();
+    });
+}
+function refreshMemoryGrid() {
+    if(!cpu) return;
+    for(let i=0;i<8;i++){
+        const ra = (memBaseAddr + i*16) >>> 0;
+        document.getElementById(`mem-addr-${i}`).textContent = `0x${ra.toString(16).padStart(8,'0')}`;
+        for(let j=0;j<4;j++){
+            const inp = document.getElementById(`mem-cell-${i}-${j}`);
+            if(document.activeElement !== inp) inp.value = (cpu.debug_read((ra + j*4)>>>0)>>>0).toString(16).padStart(8,'0');
+        }
+    }
+}
+
+// ── BINARY LOADER ──────────────────────────────────────────────────────────
+
+let totalCycles = 0;
+let halted = false;
+
+function loadBinaryIntoROM(arrayBuffer) {
+    const bytes = new Uint8Array(arrayBuffer);
+    const count = Math.floor(bytes.length / 4);
+    cpu.init();
+    
+    let mhartidHits = 0;
+    for(let i=0; i<count; i++){
+        let w = (bytes[i*4]) | (bytes[i*4+1]<<8) | (bytes[i*4+2]<<16) | (bytes[i*4+3]<<24);
+        w >>>= 0;
+
+        // EXACT MASK: 0xFFFFF07F clears bits 11:7 completely
+        if (((w & 0xFFFFF07F) >>> 0) === 0xF1402073) {
+            const rd = (w >> 7) & 0x1F;
+            w = ((rd << 7) | 0x00000013) >>> 0; 
+            mhartidHits++;
+        }
+
+        // HARDWARE BUG FIX: NOP out the csrw mtvec at 0x80000010 (word 4)
+        if (i === 4) {
+            w = 0x00000013; 
+        }
+
+        cpu.load_sram(i, w);
+    }
+
+    // ROM Boot Trampoline
+    cpu.load_rom(0, 0x800002b7); 
+    cpu.load_rom(1, 0x00028067); 
+
+    // Manually lock mtvec to correct entry point
+    cpu.set_mtvec(0x8000001c); 
+    
+    term.textContent += `[LOADER] Global Scan: Neutralized ${mhartidHits} mhartid reads.\n`;
+    term.textContent += `[LOADER] mtvec manually locked to 0x8000001c\n`;
+    last_tx = 0;
+}
+
+document.getElementById('loadBinInput').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    if(!file) return;
+    const buf = await file.arrayBuffer();
+
+    loadBinaryIntoROM(buf);
+    
+    runSpeed = 0; 
+    totalCycles = 0;
+    halted = false;
+    diagCycleCount = 0;
+    
+    term.textContent += `[SYSTEM] Ready to Fast Run ${file.name}...\n`;
+});
+
+// ── BOOT SEQUENCE ──────────────────────────────────────────────────────────
+async function bootSoC() {
+    runSpeed = 0;
+    bootBtn.disabled = true;
+    term.textContent = "[SYSTEM] Fetching SERV RTL...\n";
+    initMemoryGrid(); initRegisters();
+
+    try {
+        const files = ['serv_alu.v','serv_bufreg.v','serv_bufreg2.v','serv_csr.v','serv_ctrl.v',
+                       'serv_decode.v','serv_immdec.v','serv_mem_if.v','serv_rf_if.v','serv_rf_ram.v',
+                       'serv_rf_top.v','serv_state.v','serv_top.v','serv_aligner.v','serv_compdec.v',
+                       'serv_debug.v','serv_rf_ram_if.v'];
+        const vfs = {
+            'input.v': `module zero_soc(
+  input clk, rst_n, timer_irq,
+  output [31:0] ibus_adr, output ibus_cyc, input [31:0] ibus_rdt, input ibus_ack,
+  output [31:0] dbus_adr, output [31:0] dbus_dat, output [3:0] dbus_sel,
+  output dbus_we, output dbus_cyc, input [31:0] dbus_rdt, input dbus_ack);
+  serv_rf_top cpu(
+    .clk(clk),.i_rst(~rst_n),.i_timer_irq(timer_irq),
+    .o_ibus_adr(ibus_adr),.o_ibus_cyc(ibus_cyc),.i_ibus_rdt(ibus_rdt),.i_ibus_ack(ibus_ack),
+    .o_dbus_adr(dbus_adr),.o_dbus_dat(dbus_dat),.o_dbus_sel(dbus_sel),
+    .o_dbus_we(dbus_we),.o_dbus_cyc(dbus_cyc),.i_dbus_rdt(dbus_rdt),.i_dbus_ack(dbus_ack));
+endmodule`
+        };
+        for(const f of files) vfs[f] = await (await fetch(`https://cdn.jsdelivr.net/gh/olofk/serv@main/rtl/${f}`)).text();
+
+        const yOut = await runYosys(['-p','read_verilog -sv *.v; prep -top zero_soc; write_cxxrtl sim.cpp'], vfs);
+        const toStr = v => v instanceof Uint8Array ? new TextDecoder().decode(v) : v;
+        const simCpp = toStr(yOut['sim.cpp']);
+
+        const hRes = await fetch('https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h');
+        const cOut = await runClang(['clang++','-O3','-I/','--target=wasm32','-nostdlib','-fno-exceptions','-fno-rtti','-Wl,--no-entry','driver.cpp','-o','sim.wasm'],
+            {'driver.cpp': DRIVER_CPP, 'sim.cpp': simCpp, 'cxxrtl': {'cxxrtl.h': await hRes.text()}});
+
+        const { instance } = await WebAssembly.instantiate(cOut['sim.wasm'], {});
+        cpu = instance.exports; wasmInst = instance;
+        cpu.init();
+
+        term.textContent += `[SYSTEM] SoC ready.\n---------------------------------------------------------\n`;
+        uartInput.disabled = false;
+        document.querySelectorAll('.sim-ctrl').forEach(b => b.disabled = false);
+
+    } catch(e) { term.textContent += `\n[FATAL] ${e.message}`; } finally { bootBtn.disabled = false; }
+}
+
+// ── MAIN TICK LOOP WITH EMPIRICAL HARDWARE HEALER ──────────────────────────
+function updateOutputs() {
+    if(!cpu) return;
+    diagCycleCount++;
+    // if(diagCycleCount <= 10 || diagCycleCount % 50 === 0){
+    //     const pc = (cpu.get_pc()>>>0).toString(16).padStart(8,'0');
+    //     console.log(`frame ${diagCycleCount}: PC=0x${pc}`);
+    // }
+    refreshMemoryGrid();
+    refreshRegisters();
+    let now = cpu.read_tx_idx();
+    while(last_tx < now){
+        term.textContent += String.fromCharCode(cpu.read_tx_char(last_tx++));
+        term.scrollTop = term.scrollHeight;
+    }
+}
+// ── ISA & BUS MAPPING PROBE ───────────────────────────────────────
+// ── ISA, BUS & HEALER MAPPING PROBE ───────────────────────────────────────
+
+
+function tick() {
+    if(cpu && runSpeed > 0 && !halted){
+        for(let i=0; i<runSpeed; i++) {
+            const pc = cpu.get_pc() >>> 0;
+
+            // --- 1. THE MEPC HEALER (Required to survive trap return) ---
+            if (pc === 0x80000224) { 
+                let mepc = cpu.get_rf_reg(34) >>> 0;
+                if (mepc > 0 && mepc < 0x80000000) {
+                    cpu.set_rf_reg(34, (mepc | 0x80000000) >>> 0); 
+                }
+            }
+
+            // --- 2. ISA PROBE: Monitor the 'mul' instruction at 0x80002768 ---
+            if (pc === 0x80002768) {
+                const a5_pre = cpu.get_reg(15) >>> 0;
+                const a3_pre = cpu.get_reg(13) >>> 0;
+                
+                // Step through the instruction until PC changes
+                for(let j=0; j<100; j++) { cpu.step(); totalCycles++; if((cpu.get_pc() >>> 0) !== pc) break; }
+                
+                const a5_post = cpu.get_reg(15) >>> 0;
+                const expected = Math.imul(a5_pre, a3_pre) >>> 0;
+                
+                console.group('=== ISA MAPPING: MUL CHECK ===');
+                console.log(`PC: 0x80002768 (mul a5, a5, a3)`);
+                console.log(`Inputs:  a5=0x${a5_pre.toString(16)}, a3=0x${a3_pre.toString(16)}`);
+                console.log(`Output:  a5=0x${a5_post.toString(16)}`);
+                console.log(`Expected: 0x${expected.toString(16)}`);
+                if (a5_post !== expected) {
+                    console.error("🚨 ISA MISMATCH: Hardware ignored 'mul' or returned garbage. (Quirk #1 confirmed)");
+                } else {
+                    console.log("✅ ISA MATCH: Hardware successfully multiplied.");
+                }
+                console.groupEnd();
+                continue; // We already stepped, so skip standard step
+            }
+
+            // --- 3. BUS PROBE: Monitor the 'lbu' at 0x80002770 ---
+            // We only print this once every 50000 cycles to avoid crashing your browser with the infinite loop
+            if (pc === 0x80002770 && (totalCycles % 50000 === 0)) {
+                const a5_val = cpu.get_reg(15) >>> 0;
+                console.warn(`[BUS PROBE] lbu @ PC 0x80002770: Target Address (a5) = 0x${a5_val.toString(16)}`);
+            }
+
+            // Standard Stepping
+            cpu.step();
+            totalCycles++;
+
+            // --- 4. DERAILMENT CATCH (WITH LOGS) ---
+            const nextPc = cpu.get_pc() >>> 0;
+            if(totalCycles > 500 && nextPc < 0x80000000 && pc >= 0x80000000) {
+                console.error(`🚨 SYSTEM DERAILMENT AT CYCLE ${totalCycles} 🚨`);
+                console.log(`Transition: 0x${pc.toString(16)} -> 0x${nextPc.toString(16)}`);
+                halted = true;
+                runSpeed = 0;
+                updateOutputs();
+                return;
+            }
+        }
+        updateOutputs();
+    }
+    if (!halted) requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+bootBtn.onclick = bootSoC;
+document.getElementById('loadBinBtn').onclick = () => { if(!cpu) return; document.getElementById('loadBinInput').click(); };
+document.getElementById('btnFast').onclick  = () => runSpeed = 50000;
+document.getElementById('btnSlow').onclick  = () => runSpeed = 200;
+document.getElementById('btnPause').onclick = () => runSpeed = 0;
+document.getElementById('btnTickCyc').onclick = () => { runSpeed = 0; if(cpu){ cpu.step(); updateOutputs(); } };
+document.getElementById('btnTickInst').onclick = () => {
+    runSpeed = 0; if(!cpu) return;
+    for(let i=0;i<35;i++) cpu.step();
+    const start = cpu.get_pc() >>> 0;
+    let extra = 0;
+    while((cpu.get_pc()>>>0)===start && extra<200){ cpu.step(); extra++; }
+    updateOutputs();
+};
+
+initMemoryGrid(); initRegisters();
+</script>
+</body>
+</html>
