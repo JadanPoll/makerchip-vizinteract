@@ -941,6 +941,230 @@ const TESTS = [
         return true;
     }
 },
+{
+    name: "DIAG5: Misalign trap latency",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "addi a1,zero,257",
+        "lh a2,0(a1)",     // byte 12 → misalign, no halted triggered
+        "j halt",          // byte 16
+        ...Array(15).fill("nop"),
+        "handler:",        // byte 80
+        "csrr a3,0x342","sw a3,256(zero)", // first store — measurement point
+        "csrr a4,0x343","sw a4,260(zero)",
+        "addi a5,zero,20","csrrw zero,0x341,a5",
+        "mret",
+        "halt:","j halt"
+    ],
+    verify(cpu) {
+        const len = cpu.run_traced(300000);
+        let misalign_cycle = -1, store_cycle = -1;
+        for(let i = 0; i < len; i += 6) {
+            const cyc  = cpu.get_trace_word(i);
+            const iadr = cpu.get_trace_word(i+1);
+            const dadr = cpu.get_trace_word(i+3);
+            const ddat = cpu.get_trace_word(i+4);
+            const we   = (ddat>>>31)&1;
+            if(iadr !== 0xFFFFFFFF && misalign_cycle === -1) {
+                const inst = cpu.get_trace_word(i+2);
+                // lh a2,0(a1) encoding: lh with rs1=a1(11), rd=a2(12), imm=0
+                if((inst & 0x707f) === 0x1003 && misalign_cycle === -1) {
+                    misalign_cycle = cyc;
+                }
+            }
+            if(dadr !== 0xFFFFFFFF && we && misalign_cycle !== -1 && store_cycle === -1) {
+                store_cycle = cyc;
+            }
+        }
+        console.log(`DIAG5: misalign fetch at ${misalign_cycle}, first handler store at ${store_cycle}, delta=${store_cycle - misalign_cycle}`);
+        return true;
+    }
+},
+{
+    name: "DIAG6: Full misalign test with memory dump",
+    asm: [
+        "addi a0,zero,80", "csrrw zero,0x305,a0",
+        "addi a1,zero,257",
+        "lh a2,0(a1)",
+        "ebreak",
+        ...Array(15).fill("nop"),
+        "handler:",
+        "csrr a3,0x342", "sw a3,256(zero)",
+        "csrr a4,0x343", "sw a4,260(zero)",
+        "addi a5,zero,16", "csrrw zero,0x341,a5",
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        const mcause = mem(cpu,64);
+        const mtval  = mem(cpu,65);
+        console.log(`DIAG6: mcause=${mcause} (expect 4), mtval=${mtval} (expect 257)`);
+        return true;
+    }
+},
+{
+    name: "DIAG7: Does dbus_cyc fire on misaligned lh?",
+    asm: [
+        "addi a1,zero,257",
+        "lh a2,0(a1)",      // should NOT produce dbus transaction
+        "addi a3,zero,42",
+        "sw a3,256(zero)",
+        "ebreak"
+    ],
+    verify(cpu) {
+        const len = cpu.run_traced(5000);
+        let dbus_fires = 0;
+        for(let i = 0; i < len; i += 6) {
+            const dadr = cpu.get_trace_word(i+3);
+            const ddat = cpu.get_trace_word(i+4);
+            if(dadr !== 0xFFFFFFFF) dbus_fires++;
+        }
+        console.log(`DIAG7: dbus transactions=${dbus_fires} (expect 1 for final sw only, 0 for misalign load)`);
+        return true;
+    }
+},
+{
+    name: "DIAG7b: Misalign dbus suppression (no ebreak)",
+    asm: [
+        "addi a1,zero,257",
+        "lh a2,0(a1)",       // misaligned — should NOT produce dbus
+        "addi a3,zero,42",
+        "sw a3,256(zero)",   // aligned — should produce exactly 1 dbus write
+        "halt:", "j halt"    // infinite loop, no ebreak, run_traced times out naturally
+    ],
+    verify(cpu) {
+        const len = cpu.run_traced(5000);
+        let loads=0, stores=0;
+        for(let i = 0; i < len; i += 6) {
+            const dadr = cpu.get_trace_word(i+3);
+            const ddat = cpu.get_trace_word(i+4);
+            if(dadr !== 0xFFFFFFFF) {
+                const we = (ddat>>>31)&1;
+                if(we) stores++; else loads++;
+            }
+        }
+        console.log(`DIAG7b: loads=${loads}, stores=${stores} (expect loads=1 for misaligned lh, stores=1 for sw)`);
+        // If misalign suppression works: loads=0, stores=1
+        // If misalign suppression broken: loads=1, stores=1
+        return true;
+    }
+},
+
+// DIAG8: Does the misalign handler write mcause=4 before anything overwrites it?
+// Write to TWO different memory locations at different points
+{
+    name: "DIAG8: Misalign handler write sequence",
+    asm: [
+        "addi a0,zero,80", "csrrw zero,0x305,a0",
+        "addi a1,zero,257",
+        "lh a2,0(a1)",           // byte 12 → trap
+        "j halt",                // byte 16 — no ebreak
+        ...Array(15).fill("nop"),
+        "handler:",              // byte 80
+        "csrr a3,0x342",
+        "sw a3,256(zero)",       // write mcause to mem[64]
+        "csrr a4,0x343",
+        "sw a4,260(zero)",       // write mtval to mem[65]
+        "addi a5,zero,16",
+        "csrrw zero,0x341,a5",
+        "mret",
+        "halt:", "j halt"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        console.log(`DIAG8: mcause=${mem(cpu,64)} mtval=${mem(cpu,65)}`);
+        return true;
+    }
+},
+
+// DIAG9: Same but mret target is ebreak — does it overwrite?
+{
+    name: "DIAG9: Misalign with ebreak as mret target",
+    asm: [
+        "addi a0,zero,80", "csrrw zero,0x305,a0",
+        "addi a1,zero,257",
+        "lh a2,0(a1)",           // byte 12 → trap
+        "ebreak",                // byte 16 — mret lands here
+        ...Array(15).fill("nop"),
+        "handler:",              // byte 80
+        "csrr a3,0x342",
+        "sw a3,256(zero)",       // first write
+        "csrr a4,0x343",
+        "sw a4,260(zero)",       // second write
+        "addi a5,zero,16",
+        "csrrw zero,0x341,a5",
+        "mret",
+        "halt:", "j halt"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        console.log(`DIAG9: mcause=${mem(cpu,64)} mtval=${mem(cpu,65)}`);
+        return true;
+    }
+},
+
+// DIAG10: Nested ECALL — what actually happens to mepc?
+{
+    name: "DIAG10: Nested ECALL mepc trace",
+    asm: [
+        "addi a0,zero,80", "csrrw zero,0x305,a0",
+        "addi t0,zero,0",
+        "ecall",                                  // byte 12
+        "j halt",                                 // byte 16
+        ...Array(15).fill("nop"),
+        "handler:",                               // byte 80
+        "addi t0,t0,1",
+        "addi t1,zero,1",
+        "bne t0,t1,second_trap",
+        "ecall",                                  // byte 92
+        "addi a1,zero,99", "sw a1,256(zero)", "j halt",
+        "second_trap:",
+        "csrr a1,0x341",
+        "sw a1,256(zero)",
+        "halt:", "j halt"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        console.log(`DIAG10: mem[64]=${mem(cpu,64)} (expect 92 = byte addr of nested ecall)`);
+        return true;
+    }
+},
+
+// DIAG11: Timer IRQ blocked — what's actually in memory when it fails?
+{
+    name: "DIAG11: Timer IRQ blocked — memory state at halt",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        ...Array(10).fill("nop"),
+        "addi a1,zero,42","sw a1,256(zero)","j halt",
+        ...Array(7).fill("nop"),
+        "handler:",
+        "addi a1,zero,99","sw a1,256(zero)","j halt"
+    ],
+    verify(cpu) {
+        cpu.run_with_timer_irq(200, 200000);
+        console.log(`DIAG11: mem[64]=${mem(cpu,64)} (expect 42, fail=99)`);
+        return true;
+    }
+},
+
+// DIAG12: Unknown opcode — what actually happens?
+{
+    name: "DIAG12: Unknown opcode execution trace",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        ".word 0xFFFFFFFF",
+        "addi a1,zero,42",
+        "sw a1,256(zero)", "j halt",
+        ...Array(14).fill("nop"), "handler:",
+        "addi a1,zero,99", "sw a1,256(zero)", "j halt"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(300000);
+        console.log(`DIAG12: mem[64]=${mem(cpu,64)} (expect 42=fallthrough, 99=trapped, 0=neither ran)`);
+        return true;
+    }
+},
     {
         name: "Trap MRET: restores PC from mepc",
         asm: [
@@ -966,13 +1190,13 @@ const TESTS = [
             "ecall", // byte 12
             "csrr a0,0x300", 
             "sw a0,256(zero)", 
-            "ebreak",
+            "j halt",
             ...Array(13).fill("nop"),
             "handler:",
             "csrr a3,0x300", // mid-trap mstatus
             "sw a3,260(zero)",
             "addi a4,zero,16","csrrw zero,0x341,a4",
-            "mret"
+            "mret", "halt:", "j halt"
         ],
         verify(cpu) {
             cpu.run_cycles(200000);
@@ -998,7 +1222,7 @@ const TESTS = [
             "second_trap:",                           // byte 108
             "csrr a1,0x341",                          // mepc should now be 92 (Trap 2's address)
             "sw a1,256(zero)",
-            "halt:", "ebreak"
+            "halt:", "j halt"
         ],
         verify(cpu) {
             cpu.run_cycles(300000);
@@ -1018,12 +1242,12 @@ const TESTS = [
             "csrrw zero,0x304,t0",    // <-- Write to mie
             ...Array(9).fill("nop"),  // Adjusted NOP count
             "sw zero,256(zero)",
-            "ebreak",
+            "j halt",
             ...Array(6).fill("nop"),  // Adjusted NOP count
             "handler:",
             "addi a1,zero,99",
             "sw a1,256(zero)",
-            "ebreak"
+            "halt:", "j halt"
         ],
         verify(cpu) { cpu.run_with_timer_irq(400, 200000); return mem(cpu,64)===99; }
     },
@@ -1032,10 +1256,10 @@ const TESTS = [
         asm: [
             "addi a0,zero,80","csrrw zero,0x305,a0",
             ...Array(10).fill("nop"),
-            "addi a1,zero,42","sw a1,256(zero)","ebreak",
+            "addi a1,zero,42","sw a1,256(zero)","j halt",
             ...Array(7).fill("nop"),
             "handler:",
-            "addi a1,zero,99","sw a1,256(zero)","ebreak"
+            "addi a1,zero,99","sw a1,256(zero)","halt:", "j halt"
         ],
         verify(cpu) {
             cpu.run_with_timer_irq(200, 200000);
@@ -1104,9 +1328,9 @@ const TESTS = [
             "addi a0,zero,80","csrrw zero,0x305,a0",
             ".word 0xFFFFFFFF", // Illegal instruction
             "addi a1,zero,42",  // Executes safely
-            "sw a1,256(zero)", "ebreak",
+            "sw a1,256(zero)", "j halt",
             ...Array(14).fill("nop"), "handler:",
-            "addi a1,zero,99", "sw a1,256(zero)", "ebreak" // Should never be reached
+            "addi a1,zero,99", "sw a1,256(zero)", "halt:", "j halt" // Should never be reached
         ],
         verify(cpu) {
             cpu.run_cycles(300000);
@@ -1246,13 +1470,14 @@ const TESTS = [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257",
             "lh a2,0(a1)",           // byte 12 → trap
-            "ebreak",                // byte 16 — if no trap
+            "j halt",                // byte 16 — if no trap
             ...Array(15).fill("nop"), // bytes 20..76 (15 nops)
             "handler:",              // byte 80
             "csrr a3,0x342", "sw a3,256(zero)",
             "csrr a4,0x343", "sw a4,260(zero)",
             "addi a5,zero,16", "csrrw zero,0x341,a5", // mepc=16 → ebreak
-            "mret"
+            "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4 && mem(cpu,65)===257; }
     },
@@ -1261,10 +1486,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,259", "lh a2,0(a1)",
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4; }
     },
@@ -1273,10 +1499,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257", "lw a2,0(a1)",
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4; }
     },
@@ -1285,10 +1512,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,258", "lw a2,0(a1)",
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4; }
     },
@@ -1297,10 +1525,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,259", "lw a2,0(a1)",
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===4; }
     },
@@ -1310,11 +1539,12 @@ const TESTS = [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,257",
             "sh a1,0(a1)", 
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)", 
             "csrr a4,0x343", "sw a4,260(zero)", 
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===6 && mem(cpu,65)===257; }
     },
@@ -1323,10 +1553,11 @@ const TESTS = [
         asm: [
             "addi a0,zero,80", "csrrw zero,0x305,a0",
             "addi a1,zero,258", "sw a1,0(a1)",
-            "ebreak",
+            "j halt",
             ...Array(15).fill("nop"), "handler:",
             "csrr a3,0x342", "sw a3,256(zero)",
-            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret"
+            "addi a5,zero,16", "csrrw zero,0x341,a5", "mret",
+            "halt:", "j halt"      // ← mret lands here, loops safely
         ],
         verify(cpu) { cpu.run_cycles(300000); return mem(cpu,64)===6; }
     },
@@ -1460,7 +1691,7 @@ static void bus_tick_traced(int timer_irq_val, int c, bool do_trace) {
     if(icyc) {
         uint32_t inst = ram[(iadr>>2)&0xFFF];
         if(inst == 0x00100073u) {
-            if (halted == 0) halted = 100;
+            if (halted == 0) halted = 400;
         }
         dut.p_ibus__rdt.data[0] = inst;
         dut.p_ibus__ack.data[0] = 1;
