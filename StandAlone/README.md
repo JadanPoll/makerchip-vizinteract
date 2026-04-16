@@ -52,9 +52,13 @@ halt:
 
 The JS driver detects ebreak on **fetch** and immediately starts a countdown (`halted = 400`). SERV then spends the next ~105–139 cycles completing the trap sequence before the handler's first store executes. If the countdown expires before that store, results are lost.
 
-Measured deltas in our WASM simulation (from trap-causing instruction fetch to first handler store completing):
-- ecall/ebreak trap: **105 cycles**
-- misalign trap: **139 cycles** (extra cost from `misalign_trap_sync_r` crossing an instruction boundary — confirmed in `serv_state.v`)
+Measured deltas in our WASM simulation:
+
+- ecall/ebreak fetch → handler first fetch: **35 cycles**
+- ecall/ebreak fetch → first store inside handler: **105 cycles** (35 + 2 instructions × 35 cycles)
+- misalign fetch → handler first fetch: **69 cycles**
+- misalign fetch → first store inside handler: **139 cycles** (69 + 2 instructions × 35 cycles)
+
 
 **The safe pattern**: never use `ebreak` as a halt sentinel in any test where mtvec is live. Use `j halt` (infinite loop) instead. `run_cycles` times out naturally, and results are already in memory before the loop starts. The only safe use of `ebreak` as halt is in tests that never write mtvec.
 
@@ -292,11 +296,13 @@ Nothing else. Not mcause=1 (instruction access fault), not mcause=2 (illegal ins
 | Instruction fetch (ibus_cyc → ibus_ack) | 1 (our sim acks immediately) |
 | RF read request → ready | 2 (rgnt = rreq_r delayed 2 cycles in serv_rf_ram_if.v) |
 | Bit-serial execution (cnt=0..31) | 32 |
-| **Minimum total (single-stage op)** | **~35-40 cycles** |
-| Two-stage op (load/store/branch/shift) | ~70-80 cycles |
-| Trap entry + handler + mret | ~200-400 cycles |
+| **Single-stage op (addi, add, CSR, etc.)** | **35 cycles** |
+| Two-stage op (shifts, branches, jumps) | 67 cycles |
+| Memory op (load/store) | 68 cycles |
+| ecall/ebreak trap entry (to handler fetch) | 35 cycles |
+| Misalign trap entry (to handler fetch) | 69 cycles |
 
-**Consequence**: Cycle budgets in tests must be generous. The gauntlet uses 100,000 cycles for simple tests and up to 400,000 for trap-heavy ones. These are not arbitrary — they reflect real measured costs. If a test times out, double the budget before assuming a bug.
+**Consequence**: Cycle budgets in tests must be generous. The gauntlet uses 100,000 cycles for simple tests and up to 400,000 for trap-heavy ones. These are conservative test budgets, not instruction latencies — see the CYCLE TIMING REFERENCE section for exact costs. If a test times out, double the budget before assuming a bug.
 
 **Additional — RF write/read pipeline overlap**: `wcnt = rcnt - 4` — writes happen exactly 4 count ticks behind reads. There is a 4-cycle window where a register is being read for the current instruction while simultaneously being written with the result of the previous instruction. SERV's architecture guarantees these are always different registers. If you build an extension that violates this assumption, you get a silent read-before-write hazard.
 
@@ -489,7 +495,37 @@ cpu.get_flags();
 | Nested sequences (trap-in-loop etc.) | 500,000 |
 | Timer IRQ (needs cycles to reach assert point) | 400,000 |
 
-When a test fails unexpectedly, triple the cycle budget before investigating logic — SERV's bit-serial nature means some sequences take far longer than intuition suggests.
+These are conservative test budgets, not instruction latencies. For exact cycle costs per instruction, see the CYCLE TIMING REFERENCE section. When a test fails unexpectedly, triple the cycle budget before investigating logic — SERV's bit-serial nature means some sequences take far longer than intuition suggests.
+
+
+---
+
+## CYCLE TIMING REFERENCE (Measured from synthesized hardware)
+
+All values measured fetch-to-fetch via cycle-accurate bus trace on the CXXRTL WASM simulation. These are exact, not estimates.
+
+**Single-stage instructions** (35 cycles each):
+addi, add, sub, and, or, xor, lui, auipc, slt, sltu, slti, sltiu, all CSR instructions (RF-backed and FF-backed), ecall, ebreak, mret
+
+**Two-stage instructions** (67 cycles each):
+slli, srli, srai, sll, srl, sra, beq, bne, blt, bge, bltu, bgeu, jal, jalr
+
+**Memory instructions** (68 cycles each):
+sw, sh, sb, lw, lh, lb, lbu, lhu
+
+**Trap entry latency** (fetch-to-handler-first-fetch):
+- ecall/ebreak: **35 cycles**
+- misaligned load/store: **69 cycles**
+
+**Trap entry to first store inside handler:**
+- ecall/ebreak + N single-stage instructions: 35 + N×35 cycles
+- misalign + N single-stage instructions: 69 + N×35 cycles
+
+**Practical consequence for the halted countdown:**
+The driver's `halted=400` countdown starts on ebreak fetch. Any handler with up to 10 single-stage instructions before its critical store (35 + 10×35 = 385 cycles) completes safely within the countdown. Handlers deeper than that risk the countdown expiring before results are written.
+
+**Deriving any sequence's cycle budget:**
+Sum the cost of each instruction in order. For trap handlers, add the trap entry latency first. For loops, multiply the per-iteration cost by iteration count. These numbers are exact for this simulation — real silicon timing will differ based on clock frequency and bus latency.
 
 
 // My personal favourite one: Make sure your JS is able to instaniate the memory it thinks its instantiating, because this is baremetal, 
