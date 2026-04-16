@@ -483,17 +483,18 @@ cpu.get_flags();
 
 ## QUICK REFERENCE: CYCLE BUDGETS
 
-| Instruction class | Safe cycle budget |
-|-----------------|-----------------|
-| ALU (addi, add, xor, etc.) | 100,000 |
-| Shifts | 100,000 |
-| Loads / Stores | 100,000 |
-| Branches / Jumps | 100,000 |
-| CSR access | 100,000 |
-| Single trap (ecall/ebreak) + mret | 200,000 |
-| Trap with handler stores | 300,000 |
-| Nested sequences (trap-in-loop etc.) | 500,000 |
-| Timer IRQ (needs cycles to reach assert point) | 400,000 |
+| Instruction class | Safe cycle budget | Actual cost (exact) |
+|-----------------|-----------------|-------------------|
+| ALU (addi, add, xor, etc.) | 100,000 | 35 cycles |
+| Shifts | 100,000 | 67 cycles |
+| Loads / Stores | 100,000 | 68 cycles |
+| Branches / Jumps | 100,000 | 67 cycles |
+| CSR access | 100,000 | 35 cycles |
+| Single trap (ecall/ebreak) + mret | 200,000 | 35 + N×35 + 35 cycles |
+| Trap with handler stores | 300,000 | 69 + N×35 + 35 cycles (misalign worst case) |
+| Nested sequences (trap-in-loop etc.) | 500,000 | program-dependent, use CYCLE TIMING REFERENCE |
+| Timer IRQ (needs cycles to reach assert point) | 400,000 | 35 cycles from last wait fetch to handler |
+
 
 These are conservative test budgets, not instruction latencies. For exact cycle costs per instruction, see the CYCLE TIMING REFERENCE section. When a test fails unexpectedly, triple the cycle budget before investigating logic — SERV's bit-serial nature means some sequences take far longer than intuition suggests.
 
