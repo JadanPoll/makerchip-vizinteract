@@ -61,52 +61,373 @@
         <div class="panel" style="flex-basis: 100%;">
             <h3 style="margin-top:0; color:#ce9178;">📝 Live Assembly Editor</h3>
 <textarea id="editor" spellcheck="false">
-# ── SERV Hardware Map ──
-# 0x80000000 : UART TX (Write)
-# 0x80000004 : UART RX (Read)
-# 0x80000008 : Gamepad (Read)
-# 0x90000000 : VRAM (240x160 32-bit RGBA)
+# ==============================================================================
+# SERV RISC-V BARE-METAL SNAKE
+# ==============================================================================
+# Hardware Map:
+# s0  = 0x80000000 (UART Base / Gamepad at +8)
+# s4  = Head index in circular buffer (0-127)
+# s5  = Tail index in circular buffer (0-127)
+# s6  = Current Direction (0=R, 1=L, 2=U, 3=D)
+# s7  = Next Direction (Buffered)
+# s8  = Food X
+# s9  = Food Y
+# s11 = LFSR Random Number State
+# Buffer Base = 0x1000 (RAM)
+# ==============================================================================
 
-lui s0, 0x80000      # s0 = 0x80000000 (UART Base)
-addi s1, s0, 4       # s1 = 0x80000004 (UART RX)
-addi s2, s0, 8       # s2 = 0x80000008 (Gamepad)
-lui s3, 0x90000      # s3 = 0x90000000 (VRAM Base)
-lui s4, 0x00025      # VRAM Max Offset = 153600 = 0x25800
-addi s4, s4, 0x800
-add s5, zero, zero   # s5 = VRAM Current Offset
+_start:
+  # ----------------------------------------------------------------------------
+  # Initialization
+  # ----------------------------------------------------------------------------
+  lui s0, 0x80000       # s0 = 0x80000000
+  
+  # Initialize LFSR state
+  lui s11, 0xACE        
+  addi s11, s11, 1      # s11 = 0xACE001
 
-loop:
-# 1. Echo UART RX to TX
-lw t0, 0(s1)         
-addi t1, zero, -1
-beq t0, t1, skip_rx  
-sb t0, 0(s0)         
-skip_rx:
+  # Fill screen with Background Color (0x1a1a2eff)
+  # Low 12 bits = 0xeff (bit 11 is 1), so LUI = 0x1a1a2 + 1 = 0x1a1a3
+  lui a2, 0x1a1a3
+  addi a2, a2, 0xeff
+  lui a3, 0x90000       # VRAM Base
+  lui t0, 0x00025       
+  addi t0, t0, 0x800    # t0 = 153600 (Max Offset: 240 * 160 * 4)
+  add t1, zero, zero    # t1 = Current Offset
+fill_bg:
+  add t2, a3, t1
+  sw a2, 0(t2)
+  addi t1, t1, 4
+  blt t1, t0, fill_bg
 
-# 2. Read Gamepad & Pick Color
-lw t0, 0(s2)         
-beq t0, zero, no_btn 
+  # Initialize Game State
+  addi s4, zero, 2      # head = 2
+  addi s5, zero, 0      # tail = 0
+  addi s6, zero, 0      # dir = Right
+  addi s7, zero, 0      # next_dir = Right
+  
+  # Populate initial snake body in circular buffer at 0x1000
+  lui t0, 0x1           
+  
+  # Tail at (13, 10)
+  addi t1, zero, 13
+  slli t1, t1, 8
+  addi t1, t1, 10
+  sw t1, 0(t0)          
+  
+  # Mid at (14, 10)
+  addi t1, zero, 14
+  slli t1, t1, 8
+  addi t1, t1, 10
+  sw t1, 4(t0)          
+  
+  # Head at (15, 10)
+  addi t1, zero, 15
+  slli t1, t1, 8
+  addi t1, t1, 10
+  sw t1, 8(t0)          
 
-# If button pressed -> Green (0x00FF00FF)
-lui t1, 0x00FF0
-addi t1, t1, 0xFF
-j draw
+  # Draw initial snake cells (Color: 0x69db7cff)
+  # Low 12 = 0xcff (bit 11 is 1), LUI = 0x69db7 + 1 = 0x69db8
+  lui a2, 0x69db8
+  addi a2, a2, 0xcff
+  addi a0, zero, 13
+  addi a1, zero, 10
+  jal ra, draw_cell
+  addi a0, zero, 14
+  addi a1, zero, 10
+  jal ra, draw_cell
+  addi a0, zero, 15
+  addi a1, zero, 10
+  jal ra, draw_cell
 
-no_btn:
-# If no button -> Purple (0x800080FF)
-lui t1, 0x80008
-addi t1, t1, 0xFF
+  # Spawn first food
+  jal ra, spawn_food
 
-draw:
-# 3. Draw Pixel to VRAM
-add t2, s3, s5       # t2 = VRAM Base + Offset
-sw t1, 0(t2)         # Write Color
-    
-# 4. Advance Pixel
-addi s5, s5, 4       
-blt s5, s4, loop     # If not at end of screen, loop
-add s5, zero, zero   # Else, reset to top-left
-j loop
+
+# ----------------------------------------------------------------------------
+# Main Game Loop
+# ----------------------------------------------------------------------------
+game_loop:
+  # 1. Read Gamepad (0x80000008)
+  lw t1, 8(s0)
+  
+  # Mask and check buttons, preventing 180 degree reversals
+  andi t2, t1, 1        # Right
+  bne t2, zero, try_right
+  andi t2, t1, 2        # Left
+  bne t2, zero, try_left
+  andi t2, t1, 4        # Up
+  bne t2, zero, try_up
+  andi t2, t1, 8        # Down
+  bne t2, zero, try_down
+  j apply_dir
+  
+try_right:
+  addi t3, zero, 1      # 1 = Left
+  beq s6, t3, apply_dir # Ignore if currently moving Left
+  addi s7, zero, 0
+  j apply_dir
+try_left:
+  addi t3, zero, 0      # 0 = Right
+  beq s6, t3, apply_dir
+  addi s7, zero, 1
+  j apply_dir
+try_up:
+  addi t3, zero, 3      # 3 = Down
+  beq s6, t3, apply_dir
+  addi s7, zero, 2
+  j apply_dir
+try_down:
+  addi t3, zero, 2      # 2 = Up
+  beq s6, t3, apply_dir
+  addi s7, zero, 3
+
+apply_dir:
+  # 2. Update Direction
+  add s6, zero, s7
+  
+  # 3. Calculate New Head
+  lui t0, 0x1
+  slli t1, s4, 2
+  add t0, t0, t1
+  lw t2, 0(t0)          # Read current head coords
+  
+  srli a0, t2, 8        # X
+  andi a1, t2, 255      # Y
+  
+  addi t3, zero, 0
+  beq s6, t3, move_r
+  addi t3, zero, 1
+  beq s6, t3, move_l
+  addi t3, zero, 2
+  beq s6, t3, move_u
+  addi t3, zero, 3
+  beq s6, t3, move_d
+  
+move_r: 
+  addi a0, a0, 1
+  j move_done
+move_l: 
+  addi a0, a0, -1
+  j move_done
+move_u: 
+  addi a1, a1, -1
+  j move_done
+move_d: 
+  addi a1, a1, 1
+  j move_done
+move_done:
+
+  # 4. Check Wall Collision
+  blt a0, zero, game_over
+  addi t3, zero, 30
+  bge a0, t3, game_over
+  blt a1, zero, game_over
+  addi t3, zero, 20
+  bge a1, t3, game_over
+  
+  # 5. Check Self Collision
+  slli t3, a0, 8
+  or t3, t3, a1         # Packed new head
+  add t4, zero, s5      # Iterator = tail
+  lui t5, 0x1
+self_coll_loop:
+  slli t6, t4, 2
+  add t6, t5, t6
+  lw t6, 0(t6)
+  beq t3, t6, game_over
+  beq t4, s4, self_coll_done
+  addi t4, t4, 1
+  andi t4, t4, 127
+  j self_coll_loop
+self_coll_done:
+
+  # 6. Check Food Collision
+  bne a0, s8, no_food
+  bne a1, s9, no_food
+  
+  # 6a. Ate food! Do not advance tail.
+  jal ra, spawn_food
+  j update_head
+  
+no_food:
+  # 6b. Erase old tail
+  lui t0, 0x1
+  slli t1, s5, 2
+  add t0, t0, t1
+  lw t2, 0(t0)          # Read old tail coords
+  
+  add s1, zero, a0      # Temp save new head X
+  add s2, zero, a1      # Temp save new head Y
+  
+  srli a0, t2, 8
+  andi a1, t2, 255
+  lui a2, 0x1a1a3
+  addi a2, a2, 0xeff    # BG Color
+  jal ra, draw_cell
+  
+  add a0, zero, s1      # Restore new head X
+  add a1, zero, s2      # Restore new head Y
+  
+  # Advance tail
+  addi s5, s5, 1
+  andi s5, s5, 127
+  
+update_head:
+  # 7. Add New Head to Buffer
+  addi s4, s4, 1
+  andi s4, s4, 127
+  
+  slli t3, a0, 8
+  or t3, t3, a1
+  lui t0, 0x1
+  slli t1, s4, 2
+  add t0, t0, t1
+  sw t3, 0(t0)
+  
+  # 8. Draw New Head Cell
+  lui a2, 0x69db8
+  addi a2, a2, 0xcff    # Snake Color
+  jal ra, draw_cell
+  
+  # 9. Frame Delay (500,000 cycles)
+  # 4096 + 804 = 4900 loops at 102 cycles each
+  lui t0, 1
+  addi t0, t0, 804
+delay_loop:
+  addi t0, t0, -1
+  bne t0, zero, delay_loop
+  
+  # 10. Loop
+  j game_loop
+
+
+# ----------------------------------------------------------------------------
+# Subroutine: Draw Cell (8x8)
+# Inputs: a0 = X, a1 = Y, a2 = Color
+# ----------------------------------------------------------------------------
+draw_cell:
+  lui a3, 0x90000       # VRAM Base
+  # Multiply Y by 7680 (8192 - 512)
+  slli t0, a1, 13
+  slli t1, a1, 9
+  sub t0, t0, t1        # Y offset
+  # Multiply X by 32
+  slli t1, a0, 5        # X offset
+  add a3, a3, t0
+  add a3, a3, t1        # a3 = Absolute Pixel Addr
+  
+  addi t0, zero, 8      # Row count
+draw_cell_row:
+  addi t1, zero, 8      # Col count
+  add t2, zero, a3      # Current row pointer
+draw_cell_col:
+  sw a2, 0(t2)
+  addi t2, t2, 4
+  addi t1, t1, -1
+  bne t1, zero, draw_cell_col
+  
+  addi a3, a3, 960      # 240 pixels * 4 bytes = Next Row
+  addi t0, t0, -1
+  bne t0, zero, draw_cell_row
+  
+  jalr zero, ra, 0
+
+
+# ----------------------------------------------------------------------------
+# Subroutines: LFSR & Random Generation
+# ----------------------------------------------------------------------------
+lfsr_next:
+  andi t0, s11, 1
+  srli s11, s11, 1
+  beq t0, zero, lfsr_skip
+  lui t1, 0xB
+  addi t1, t1, 1024     # 0xB400 polynomial
+  xor s11, s11, t1
+lfsr_skip:
+  jalr zero, ra, 0
+
+rand_30:
+  add gp, zero, ra      # Save ra
+rand_30_loop:
+  jal ra, lfsr_next
+  andi a0, s11, 31      # Fast modulo mask
+  addi t1, zero, 30
+  bge a0, t1, rand_30_loop # Rejection sample
+  add ra, zero, gp      # Restore ra
+  jalr zero, ra, 0
+
+rand_20:
+  add gp, zero, ra      # Save ra
+rand_20_loop:
+  jal ra, lfsr_next
+  andi a0, s11, 31      # Fast modulo mask
+  addi t1, zero, 20
+  bge a0, t1, rand_20_loop # Rejection sample
+  add ra, zero, gp      # Restore ra
+  jalr zero, ra, 0
+
+spawn_food:
+  add tp, zero, ra      # Save ra
+spawn_food_loop:
+  jal ra, rand_30
+  add s8, zero, a0
+  jal ra, rand_20
+  add s9, zero, a0
+  
+  # Validate food is not on snake
+  slli t3, s8, 8
+  or t3, t3, s9
+  add t4, zero, s5      # Iterator = tail
+  lui t5, 0x1
+spawn_check_loop:
+  slli t6, t4, 2
+  add t6, t5, t6
+  lw t6, 0(t6)
+  beq t3, t6, spawn_food_loop
+  beq t4, s4, spawn_check_done
+  addi t4, t4, 1
+  andi t4, t4, 127
+  j spawn_check_loop
+spawn_check_done:
+  
+  add a0, zero, s8
+  add a1, zero, s9
+  # Color: 0xf97171ff (Low 12=0x1ff, MSB=0, no LUI offset needed)
+  lui a2, 0xf9717
+  addi a2, a2, 0x1ff
+  jal ra, draw_cell
+  
+  add ra, zero, tp      # Restore ra
+  jalr zero, ra, 0
+
+
+# ----------------------------------------------------------------------------
+# Game Over State
+# ----------------------------------------------------------------------------
+game_over:
+  # Fill screen with Red (0xff0000ff)
+  lui a2, 0xff000
+  addi a2, a2, 0x0ff
+  lui a3, 0x90000
+  lui t0, 0x00025
+  addi t0, t0, 0x800
+  add t1, zero, zero
+fill_red:
+  add t2, a3, t1
+  sw a2, 0(t2)
+  addi t1, t1, 4
+  blt t1, t0, fill_red
+  
+  # Death Delay (approx 1 sec)
+  lui t0, 0x100
+go_delay:
+  addi t0, t0, -1
+  bne t0, zero, go_delay
+  
+  # Restart
+  j _start
 </textarea>
         </div>
 
