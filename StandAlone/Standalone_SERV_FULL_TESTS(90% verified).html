@@ -1527,7 +1527,7 @@ const TESTS = [
             ...Array(9).fill("nop"),                   // Pad to 80
             "handler:",                                // byte 80
             "addi a1,zero,42", "sw a1,256(zero)", "mret",
-            "halt:", "ebreak"
+            "halt:", "j halt"
         ],
         verify(cpu) {
             // Pulse 1: cycles 50-100 (while MIE=0)
