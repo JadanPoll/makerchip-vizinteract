@@ -474,3 +474,7 @@ cpu.get_flags();
 | Timer IRQ (needs cycles to reach assert point) | 400,000 |
 
 When a test fails unexpectedly, triple the cycle budget before investigating logic — SERV's bit-serial nature means some sequences take far longer than intuition suggests.
+
+
+// My personal favourite one: Make sure your JS is able to instaniate the memory it thinks its instantiating, because this is baremetal, 
+// will harden this later on but until i can impelment a state of the art memory manager, don't go around instantiating 4GB+ hotswap RAM unless you know what you're doing!
