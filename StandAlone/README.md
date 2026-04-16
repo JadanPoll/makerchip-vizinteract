@@ -48,6 +48,22 @@ halt:
 
 ---
 
+**Quirk #2b: THE HALT COUNTDOWN RACES WITH TRAP HANDLER EXECUTION**
+
+The JS driver detects ebreak on **fetch** and immediately starts a countdown (`halted = 400`). SERV then spends the next ~105–139 cycles completing the trap sequence before the handler's first store executes. If the countdown expires before that store, results are lost.
+
+Measured deltas in our WASM simulation (from trap-causing instruction fetch to first handler store completing):
+- ecall/ebreak trap: **105 cycles**
+- misalign trap: **139 cycles** (extra cost from `misalign_trap_sync_r` crossing an instruction boundary — confirmed in `serv_state.v`)
+
+**The safe pattern**: never use `ebreak` as a halt sentinel in any test where mtvec is live. Use `j halt` (infinite loop) instead. `run_cycles` times out naturally, and results are already in memory before the loop starts. The only safe use of `ebreak` as halt is in tests that never write mtvec.
+
+**Why misalign costs more**: `misalign_trap_sync_r` persists across a full instruction fetch boundary before firing. ecall/ebreak trap directly via `i_e_op` with no such delay.
+
+**RTL root**: `o_ctrl_trap = WITH_CSR & (i_e_op | i_new_irq | misalign_trap_sync)` — any ebreak anywhere in the instruction stream unconditionally asserts `o_ctrl_trap` with no MIE check and no "already in handler" guard.
+
+---
+
 ## 3. TIMER IRQ IS EDGE-TRIGGERED, NOT LEVEL-TRIGGERED
 
 **You might expect**: Holding `timer_irq` high will continuously retrigger interrupts.
@@ -93,12 +109,12 @@ assign pc_plus_offset_aligned[0] = pc_plus_offset[0] & !i_cnt0;
 
 **SERV actually does**: Returns whatever happens to be in the RF RAM slot that the address partially decodes to.
 
-**Why**: `serv_decode.v` maps CSR addresses using only bits 26, 22, 21, 20:
+**Why**: `serv_decode.v` maps CSR addresses using only bits 26, 21, 20:
 ```verilog
 wire csr_valid = op20 | (op26 & !op21);
 wire co_csr_addr = {op26 & op20, !op26 | op21};
 ```
-Address 0xF11 has op26=1, op22=1, op21=1, op20=1 → `csr_valid=1`, `csr_addr=11` (mtval slot). So writing 0xF11 actually writes mtval (RF[35]), and reading it back returns whatever is in mtval. It is NOT silently ignored and NOT zero.
+Address 0xF11 has op26=1, op21=1, op20=1 → `csr_valid=1`, `csr_addr=11` (mtval slot). So writing 0xF11 actually writes mtval (RF[35]), and reading it back returns whatever is in mtval. It is NOT silently ignored and NOT zero.
 
 **The only CSRs SERV actually implements**:
 | Address | Name | Storage | csr_addr |
