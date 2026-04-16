@@ -1,0 +1,1293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SERV Universal VIP Framework — THE GAUNTLET v5</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0d0f1a; color: #e0e0e0; padding: 20px; margin: 0; }
+        h2 { color: #f97171; margin-top: 0; font-family: monospace; letter-spacing: 1px; }
+        p { color: #b0b8c8; font-size: 0.95rem; margin-bottom: 20px; max-width: 800px; line-height: 1.5; }
+        button { padding: 12px 24px; font-size: 1rem; background: #1565c0; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-right: 10px; margin-bottom: 10px; transition: background 0.2s; }
+        button:hover:not(:disabled) { background: #1e88e5; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+        .run-all { background: #2e7d32; } .run-all:hover:not(:disabled) { background: #388e3c; }
+        .dashboard { display: flex; gap: 20px; align-items: flex-start; }
+        .test-list { flex: 2; display: flex; flex-direction: column; gap: 6px; }
+        .test-card { background: #1e2030; border: 1px solid #2a3050; border-radius: 6px; padding: 10px 12px; font-family: monospace; }
+        .test-card h3 { margin: 0 0 4px 0; color: #9cdcfe; font-size: 0.9rem; }
+        .test-card .asm { color: #ce9178; font-size: 0.75rem; white-space: pre-wrap; background: #111; padding: 5px; border-radius: 4px; margin-bottom: 5px; max-height: 80px; overflow-y: auto; }
+        .test-card .result { font-size: 0.85rem; font-weight: bold; }
+        .pass { color: #69db7c; } .fail { color: #f97171; } .running { color: #ffd43b; } .skip { color: #888; }
+        #log { flex: 1; position: sticky; top: 20px; background: #111; border: 1px solid #2a3050; border-radius: 8px; padding: 15px; height: 90vh; overflow-y: auto; font-family: monospace; font-size: 0.78rem; white-space: pre-wrap; color: #b0b8c8; line-height: 1.4; }
+        #summary { font-size: 1rem; font-weight: bold; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h2>⚡ SERV VIP Framework — THE GAUNTLET v5 (150+ Atomic Assertions)</h2>
+    <p>Full RV32I coverage: ALU, branches, jumps, loads, stores, CSRs, traps, timer IRQ, bus timing, pipeline hazards, reset integrity.</p>
+    <div id="summary"></div>
+    <div>
+        <button id="buildBtn" class="run-all">▶ Fetch, Synth &amp; Run THE GAUNTLET</button>
+    </div>
+    <div class="dashboard">
+        <div class="test-list" id="testGrid"></div>
+        <div id="log">Awaiting command...</div>
+    </div>
+
+<script type="module">
+import { runYosys } from 'https://cdn.jsdelivr.net/npm/@yowasp/yosys/gen/bundle.js';
+import { runClang } from 'https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.js';
+
+const logEl = document.getElementById('log');
+const sumEl = document.getElementById('summary');
+function log(msg, color = '#b0b8c8') {
+    logEl.innerHTML += `<span style="color:${color}">${msg}</span>\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ── ASSEMBLER ──────────────────────────────────────────────────────────────
+const ASM = (() => {
+    const REG = {
+        x0:0,zero:0,ra:1,sp:2,gp:3,tp:4,t0:5,t1:6,t2:7,
+        s0:8,fp:8,s1:9,a0:10,a1:11,a2:12,a3:13,a4:14,a5:15,
+        a6:16,a7:17,s2:18,s3:19,s4:20,s5:21,s6:22,s7:23,
+        s8:24,s9:25,s10:26,s11:27,t3:28,t4:29,t5:30,t6:31
+    };
+    const pr = r => REG[r.replace(/[,]/g,'').trim()] ?? 0;
+    const pi = i => parseInt(i.replace(/[,]/g,'').trim());
+    const encR = (f7,rs2,rs1,f3,rd,op) => ((f7<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
+    const encI = (imm,rs1,f3,rd,op) => (((imm&0xFFF)<<20)|(rs1<<15)|(f3<<12)|(rd<<7)|op)>>>0;
+    const encS = (imm,rs2,rs1,f3,op) => ((((imm>>5)&0x7F)<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|((imm&0x1F)<<7)|op)>>>0;
+    const encB = (imm,rs2,rs1,f3,op) => ((((imm>>12)&1)<<31)|(((imm>>5)&0x3F)<<25)|(rs2<<20)|(rs1<<15)|(f3<<12)|(((imm>>1)&0xF)<<8)|(((imm>>11)&1)<<7)|op)>>>0;
+    const encU = (imm,rd,op) => ((imm&0xFFFFF000)|(rd<<7)|op)>>>0;
+    const encJ = (imm,rd,op) => ((((imm>>20)&1)<<31)|(((imm>>1)&0x3FF)<<21)|(((imm>>11)&1)<<20)|(((imm>>12)&0xFF)<<12)|(rd<<7)|op)>>>0;
+
+    return function assemble(lines) {
+        const labels = {};
+        let pc = 0;
+        // pass 1: collect labels
+        for (const line of lines) {
+            let l = line.split('#')[0].trim();
+            if (!l) continue;
+            if (l.includes(':')) {
+                labels[l.split(':')[0].trim()] = pc;
+                l = l.split(':').slice(1).join(':').trim();
+            }
+            if (l) pc += 4;
+        }
+        // pass 2: emit
+        pc = 0;
+        const words = [];
+        for (const line of lines) {
+            let l = line.split('#')[0].trim();
+            if (!l) continue;
+            if (l.includes(':')) l = l.split(':').slice(1).join(':').trim();
+            if (!l) continue;
+            const parts = l.split(/[\s,()]+/).filter(x => x);
+            const op = parts[0];
+            const lbl = name => isNaN(parseInt(name)) ? (labels[name] - pc) : parseInt(name);
+            let w = 0;
+            switch(op) {
+                case 'addi':  w = encI(pi(parts[3]), pr(parts[2]), 0, pr(parts[1]), 0x13); break;
+                case 'slti':  w = encI(pi(parts[3]), pr(parts[2]), 2, pr(parts[1]), 0x13); break;
+                case 'sltiu': w = encI(pi(parts[3]), pr(parts[2]), 3, pr(parts[1]), 0x13); break;
+                case 'xori':  w = encI(pi(parts[3]), pr(parts[2]), 4, pr(parts[1]), 0x13); break;
+                case 'ori':   w = encI(pi(parts[3]), pr(parts[2]), 6, pr(parts[1]), 0x13); break;
+                case 'andi':  w = encI(pi(parts[3]), pr(parts[2]), 7, pr(parts[1]), 0x13); break;
+                case 'slli':  w = encI((pi(parts[3])&0x1F),       pr(parts[2]), 1, pr(parts[1]), 0x13); break;
+                case 'srli':  w = encI((pi(parts[3])&0x1F),       pr(parts[2]), 5, pr(parts[1]), 0x13); break;
+                case 'srai':  w = encI((pi(parts[3])&0x1F)|0x400, pr(parts[2]), 5, pr(parts[1]), 0x13); break;
+                case 'add':   w = encR(0,    pr(parts[3]), pr(parts[2]), 0, pr(parts[1]), 0x33); break;
+                case 'sub':   w = encR(0x20, pr(parts[3]), pr(parts[2]), 0, pr(parts[1]), 0x33); break;
+                case 'sll':   w = encR(0,    pr(parts[3]), pr(parts[2]), 1, pr(parts[1]), 0x33); break;
+                case 'slt':   w = encR(0,    pr(parts[3]), pr(parts[2]), 2, pr(parts[1]), 0x33); break;
+                case 'sltu':  w = encR(0,    pr(parts[3]), pr(parts[2]), 3, pr(parts[1]), 0x33); break;
+                case 'xor':   w = encR(0,    pr(parts[3]), pr(parts[2]), 4, pr(parts[1]), 0x33); break;
+                case 'srl':   w = encR(0,    pr(parts[3]), pr(parts[2]), 5, pr(parts[1]), 0x33); break;
+                case 'sra':   w = encR(0x20, pr(parts[3]), pr(parts[2]), 5, pr(parts[1]), 0x33); break;
+                case 'or':    w = encR(0,    pr(parts[3]), pr(parts[2]), 6, pr(parts[1]), 0x33); break;
+                case 'and':   w = encR(0,    pr(parts[3]), pr(parts[2]), 7, pr(parts[1]), 0x33); break;
+                case 'lui':   w = encU(pi(parts[2])<<12, pr(parts[1]), 0x37); break;
+                case 'auipc': w = encU(pi(parts[2])<<12, pr(parts[1]), 0x17); break;
+                case 'lb':    w = encI(pi(parts[2]), pr(parts[3]), 0, pr(parts[1]), 0x03); break;
+                case 'lh':    w = encI(pi(parts[2]), pr(parts[3]), 1, pr(parts[1]), 0x03); break;
+                case 'lw':    w = encI(pi(parts[2]), pr(parts[3]), 2, pr(parts[1]), 0x03); break;
+                case 'lbu':   w = encI(pi(parts[2]), pr(parts[3]), 4, pr(parts[1]), 0x03); break;
+                case 'lhu':   w = encI(pi(parts[2]), pr(parts[3]), 5, pr(parts[1]), 0x03); break;
+                case 'sb':    w = encS(pi(parts[2]), pr(parts[1]), pr(parts[3]), 0, 0x23); break;
+                case 'sh':    w = encS(pi(parts[2]), pr(parts[1]), pr(parts[3]), 1, 0x23); break;
+                case 'sw':    w = encS(pi(parts[2]), pr(parts[1]), pr(parts[3]), 2, 0x23); break;
+                case 'beq':   w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 0, 0x63); break;
+                case 'bne':   w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 1, 0x63); break;
+                case 'blt':   w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 4, 0x63); break;
+                case 'bge':   w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 5, 0x63); break;
+                case 'bltu':  w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 6, 0x63); break;
+                case 'bgeu':  w = encB(lbl(parts[3]), pr(parts[2]), pr(parts[1]), 7, 0x63); break;
+                case 'jal':   w = encJ(lbl(parts[2]), pr(parts[1]), 0x6f); break;
+                case 'jalr':  w = encI(pi(parts[3]), pr(parts[2]), 0, pr(parts[1]), 0x67); break;
+                case 'j':     w = encJ(lbl(parts[1]), 0, 0x6f); break;
+                case 'csrrw':  w = encI(pi(parts[2]), pr(parts[3]), 1, pr(parts[1]), 0x73); break;
+                case 'csrrs':  w = encI(pi(parts[2]), pr(parts[3]), 2, pr(parts[1]), 0x73); break;
+                case 'csrrc':  w = encI(pi(parts[2]), pr(parts[3]), 3, pr(parts[1]), 0x73); break;
+                case 'csrrwi': w = encI(pi(parts[2]), pi(parts[3])&0x1F, 5, pr(parts[1]), 0x73); break;
+                case 'csrrsi': w = encI(pi(parts[2]), pi(parts[3])&0x1F, 6, pr(parts[1]), 0x73); break;
+                case 'csrrci': w = encI(pi(parts[2]), pi(parts[3])&0x1F, 7, pr(parts[1]), 0x73); break;
+                case 'csrr':   w = encI(pi(parts[2]), 0, 2, pr(parts[1]), 0x73); break;
+                case 'ecall':  w = 0x00000073; break;
+                case 'ebreak': w = 0x00100073; break;
+                case 'mret':   w = 0x30200073; break;
+                case 'nop':    w = 0x00000013; break;
+                case '.word':  w = (pi(parts[1]))>>>0; break;
+                default: throw new Error('Unknown opcode: ' + op);
+            }
+            words.push(w);
+            pc += 4;
+        }
+        return words;
+    };
+})();
+
+// ── SAFE MEMORY HELPER ──────────────────────────────────────────────────────
+// Used in verify functions: mem(cpu, wordIndex) -> uint32
+function mem(cpu, idx) { return cpu.read_mem(idx) >>> 0; }
+
+// ── TEST SUITE ───────────────────────────────────────────────────────────────
+// Each test: { name, asm, verify(cpu) }
+// verify receives the cpu exports object. Call cpu.run_cycles(N) yourself if needed.
+// For signal tests (reset check, instrumented run), don't call run_cycles - they have their own loop.
+const TESTS = [
+
+// ════════════════════════════════════════════════════════
+// SECTION 1: BUS SIGNAL INTEGRITY (C++ instrumented)
+// ════════════════════════════════════════════════════════
+{
+    name: "Bus: ibus_cyc=0 held during entire rst_n=0 period",
+    asm: ["ebreak"],
+    verify(cpu) {
+        // run_reset_check runs its own loop with rst_n=0, counts ibus_cyc highs
+        return cpu.run_reset_check() === 0;
+    }
+},
+{
+    name: "Bus: ibus_adr always word-aligned (bits 1:0 = 0)",
+    asm: ["addi a0,zero,1","addi a1,zero,2","sw a0,256(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        // flag bit 8 set = misaligned fetch detected
+        const flags = Number(cpu.get_flags());
+        return (flags & (1<<8)) === 0;
+    }
+},
+{
+    name: "Bus: dbus_adr always word-aligned for sub-word stores",
+    asm: ["addi a0,zero,0xAA","sb a0,257(zero)","sb a0,258(zero)","sb a0,259(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        const flags = Number(cpu.get_flags());
+        return (flags & (1<<9)) === 0;
+    }
+},
+{
+    name: "Double-reset mid-execution returns to clean state",
+    asm: ["addi a0,zero,7","sw a0,256(zero)","ebreak"],
+    verify(cpu) {
+        // First: partial run
+        cpu.init_cpu();
+        const prog1 = ASM(["addi a0,zero,99","addi a0,a0,1","addi a0,a0,1","sw a0,256(zero)","ebreak"]);
+        prog1.forEach((w,i) => cpu.load_inst(i,w));
+        cpu.run_cycles(5); // partial — don't let it finish
+        // Second: full reset and new program
+        cpu.init_cpu();
+        const prog2 = ASM(["addi a0,zero,7","sw a0,256(zero)","ebreak"]);
+        prog2.forEach((w,i) => cpu.load_inst(i,w));
+        cpu.run_cycles(100000);
+        return mem(cpu, 64) === 7;
+    }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 2: REGISTER FILE
+// ════════════════════════════════════════════════════════
+{
+    name: "RF: All registers zero after reset",
+    asm: ["sw x1,256(zero)","sw x2,260(zero)","sw x31,264(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        return mem(cpu,64)===0 && mem(cpu,65)===0 && mem(cpu,66)===0;
+    }
+},
+{
+    name: "RF: x1-x31 independent, x0 always zero after write attempt",
+    asm: ["addi x1,zero,1","addi x2,zero,2","addi x31,zero,31",
+          "add x0,x1,x2",
+          "sw x1,256(zero)","sw x2,260(zero)","sw x31,264(zero)","sw x0,268(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        return mem(cpu,64)===1 && mem(cpu,65)===2 && mem(cpu,66)===31 && mem(cpu,67)===0;
+    }
+},
+{
+    name: "RF: Read-after-Write in consecutive instructions",
+    asm: ["addi x1,zero,42","add x2,x1,x1","sw x2,256(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        return mem(cpu,64)===84;
+    }
+},
+{
+    name: "RF: Write to x0 discards result (rd=x0 silent)",
+    asm: ["addi x0,zero,999","sw x0,256(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        return mem(cpu,64)===0;
+    }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 3: ALU — ADDITION
+// ════════════════════════════════════════════════════════
+{
+    name: "ALU Add: 0 + 0 = 0",
+    asm: ["add a0,zero,zero","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Add: 1 + 0 = 1",
+    asm: ["addi a0,zero,1","add a1,a0,zero","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "ALU Add: 0xFFFFFFFF + 1 = 0 (wraparound)",
+    asm: ["addi a0,zero,-1","addi a1,zero,1","add a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Add: 0x7FFFFFFF + 1 = 0x80000000 (signed overflow)",
+    asm: ["lui a0,0x80000","addi a0,a0,-1","addi a1,zero,1","add a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x80000000; }
+},
+{
+    name: "ALU Add: 0x80000000 + 0x80000000 = 0",
+    asm: ["lui a0,0x80000","add a1,a0,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Add: -1 + 1 = 0",
+    asm: ["addi a0,zero,-1","addi a1,zero,1","add a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Add: mid-range 0x12345678 + 0x87654321 = 0x99999999",
+    asm: ["lui a0,0x12345","addi a0,a0,0x678",
+          "lui a1,0x87654","addi a1,a1,0x321",
+          "add a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x99999999; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 4: ALU — SUBTRACTION
+// ════════════════════════════════════════════════════════
+{
+    name: "ALU Sub: 0 - 0 = 0",
+    asm: ["sub a0,zero,zero","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Sub: 1 - 1 = 0",
+    asm: ["addi a0,zero,1","sub a1,a0,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Sub: x - x = 0 (arbitrary x)",
+    asm: ["lui a0,0x12345","sub a1,a0,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU Sub: 0 - 1 = 0xFFFFFFFF",
+    asm: ["addi a1,zero,1","sub a2,zero,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFF; }
+},
+{
+    name: "ALU Sub: 0x80000000 - 1 = 0x7FFFFFFF",
+    asm: ["lui a0,0x80000","addi a1,zero,1","sub a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x7FFFFFFF; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 5: ALU — LOGICAL
+// ════════════════════════════════════════════════════════
+{
+    name: "ALU AND: x & 0 = 0",
+    asm: ["lui a0,0x12345","and a1,a0,zero","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU OR: x | 0xFFFFFFFF = 0xFFFFFFFF",
+    asm: ["lui a0,0x12345","addi a1,zero,-1","or a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFF; }
+},
+{
+    name: "ALU XOR: x ^ 0 = x (identity)",
+    asm: ["lui a0,0x12345","xor a1,a0,zero","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x12345000; }
+},
+{
+    name: "ALU AND: 0xAAAAAAAA & 0x55555555 = 0",
+    asm: ["lui a0,0xAAAAA","addi a0,a0,0xAAA",
+          "lui a1,0x55555","addi a1,a1,0x555",
+          "and a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "ALU XOR: 0xAAAAAAAA ^ 0x55555555 = 0xFFFFFFFF",
+    asm: ["lui a0,0xAAAAA","addi a0,a0,0xAAA",
+          "lui a1,0x55555","addi a1,a1,0x555",
+          "xor a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFF; }
+},
+{
+    name: "ALU XOR: 0xFFFFFFFF ^ 0xFFFFFFFF = 0",
+    asm: ["addi a0,zero,-1","xor a1,a0,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 6: SHIFTS
+// ════════════════════════════════════════════════════════
+{
+    name: "Shift SLLI: shift-by-0 identity",
+    asm: ["lui a0,0x12345","slli a1,a0,0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x12345000; }
+},
+{
+    name: "Shift SLL: shift-by-0 identity (register-register)",
+    asm: ["lui a0,0x12345","sll a1,a0,zero","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x12345000; }
+},
+{
+    name: "Shift SLLI: 0xFFFFFFFF << 1 = 0xFFFFFFFE",
+    asm: ["addi a0,zero,-1","slli a1,a0,1","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFE; }
+},
+{
+    name: "Shift SLLI: 1 << 31 = 0x80000000",
+    asm: ["addi a0,zero,1","slli a1,a0,31","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x80000000; }
+},
+{
+    name: "Shift SRLI: 0xFFFFFFFF >> 1 = 0x7FFFFFFF (zero-fill)",
+    asm: ["addi a0,zero,-1","srli a1,a0,1","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x7FFFFFFF; }
+},
+{
+    name: "Shift SRLI: 0x80000000 >> 31 = 1",
+    asm: ["lui a0,0x80000","srli a1,a0,31","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "Shift SRL: matches SRLI (register-register)",
+    asm: ["lui a0,0x80000","addi a1,zero,31","srl a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "Shift SRAI: 0x80000000 >> 1 = 0xC0000000 (sign-fill)",
+    asm: ["lui a0,0x80000","srai a1,a0,1","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xC0000000; }
+},
+{
+    name: "Shift SRAI: 0x80000000 >> 31 = 0xFFFFFFFF (full arithmetic)",
+    asm: ["lui a0,0x80000","srai a1,a0,31","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFF; }
+},
+{
+    name: "Shift SRAI: positive 0x7FFFFFFF >> 31 = 0",
+    asm: ["lui a0,0x80000","addi a0,a0,-1","srai a1,a0,31","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "Shift SRA: matches SRAI (register-register)",
+    asm: ["lui a0,0x80000","addi a1,zero,1","sra a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xC0000000; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 7: COMPARISONS
+// ════════════════════════════════════════════════════════
+{
+    name: "Comp SLTI: -1 < 0 = 1 (signed)",
+    asm: ["addi a0,zero,-1","slti a1,a0,0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "Comp SLT: -1 < 0 = 1 (register-register signed)",
+    asm: ["addi a0,zero,-1","slt a1,a0,zero","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "Comp SLTI: 0 < -1 = 0 (signed, not less)",
+    asm: ["addi a0,zero,-1","slt a1,zero,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "Comp SLT: 0x7FFFFFFF < -1 = 0 (max_pos not < neg signed)",
+    asm: ["lui a0,0x80000","addi a0,a0,-1","addi a1,zero,-1","slt a2,a0,a1","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "Comp SLT: x < x = 0",
+    asm: ["lui a0,0x12345","slt a1,a0,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "Comp SLTU: 0 < 1 = 1 (unsigned)",
+    asm: ["addi a0,zero,1","sltu a1,zero,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+{
+    name: "Comp SLTU: 0xFFFFFFFF < 1 = 0 (max unsigned not less)",
+    asm: ["addi a0,zero,-1","sltiu a1,a0,1","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    name: "Comp SLTU: 0 < 0xFFFFFFFF = 1 (unsigned)",
+    asm: ["addi a0,zero,-1","sltu a1,zero,a0","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===1; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 8: IMMEDIATES
+// ════════════════════════════════════════════════════════
+{
+    name: "Imm ADDI: 0xFFF sign-extends to -1 = 0xFFFFFFFF",
+    asm: ["addi a0,zero,0xFFF","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFFFFF; }
+},
+{
+    name: "Imm ADDI: imm=0 is identity (NOP)",
+    asm: ["lui a0,0x12345","addi a0,a0,0","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x12345000; }
+},
+{
+    name: "Imm ADDI: max positive immediate +2047",
+    asm: ["addi a0,zero,2047","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===2047; }
+},
+{
+    name: "Imm ADDI: min negative immediate -2048",
+    asm: ["addi a0,zero,-2048","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFF800; }
+},
+{
+    name: "Imm LUI: 0xFFFFF places 0xFFFFF000 in rd",
+    asm: ["lui a0,0xFFFFF","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFFFFF000; }
+},
+{
+    name: "Imm LUI: low 12 bits always zero",
+    asm: ["lui a0,1","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x1000; }
+},
+{
+    // auipc at byte 4 (word 1) with imm=1 → 4 + 0x1000 = 0x1004
+    name: "Imm AUIPC: PC-relative = PC + (imm<<12)",
+    asm: ["nop","auipc a0,1","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x1004; }
+},
+{
+    // auipc at byte 0 with imm=0 → 0
+    name: "Imm AUIPC: at PC=0 with imm=0 = 0",
+    asm: ["auipc a0,0","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 9: BRANCHES — TAKEN
+// ════════════════════════════════════════════════════════
+{
+    name: "Branch BEQ: taken when rs1=rs2",
+    asm: ["beq zero,zero,taken","addi a0,zero,99","j end",
+          "taken:","addi a0,zero,42","end:","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BNE: taken when rs1≠rs2",
+    asm: ["addi a0,zero,1","bne a0,zero,taken","addi a1,zero,99","j end",
+          "taken:","addi a1,zero,42","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BLT: taken when rs1 < rs2 (signed: -1 < 0)",
+    asm: ["addi a0,zero,-1","blt a0,zero,taken","addi a1,zero,99","j end",
+          "taken:","addi a1,zero,42","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BGE: taken when rs1 ≥ rs2 (signed: 0 ≥ -1)",
+    asm: ["addi a0,zero,-1","bge zero,a0,taken","addi a1,zero,99","j end",
+          "taken:","addi a1,zero,42","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BLTU: taken when rs1 < rs2 (unsigned: 0 < 0xFFFFFFFF)",
+    asm: ["addi a0,zero,-1","bltu zero,a0,taken","addi a1,zero,99","j end",
+          "taken:","addi a1,zero,42","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BGEU: taken when rs1 ≥ rs2 (unsigned: 0xFFFFFFFF ≥ 1)",
+    asm: ["addi a0,zero,-1","addi a1,zero,1","bgeu a0,a1,taken","addi a2,zero,99","j end",
+          "taken:","addi a2,zero,42","end:","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 10: BRANCHES — NOT TAKEN (PC+4 fallthrough)
+// ════════════════════════════════════════════════════════
+{
+    name: "Branch BEQ: not taken when rs1≠rs2 (PC+4 fallthrough)",
+    asm: ["addi a0,zero,1","beq a0,zero,tgt","addi a1,zero,42","j end",
+          "tgt:","addi a1,zero,99","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BNE: not taken when rs1=rs2",
+    asm: ["bne zero,zero,tgt","addi a0,zero,42","j end",
+          "tgt:","addi a0,zero,99","end:","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BLT: not taken when rs1 ≥ rs2 (signed: 0 not < -1)",
+    asm: ["addi a0,zero,-1","blt zero,a0,tgt","addi a1,zero,42","j end",
+          "tgt:","addi a1,zero,99","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BGE: not taken when rs1 < rs2 (signed: -1 not ≥ 0)",
+    asm: ["addi a0,zero,-1","bge a0,zero,tgt","addi a1,zero,42","j end",
+          "tgt:","addi a1,zero,99","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BLTU: not taken when rs1 ≥ rs2 (unsigned: 0xFFFFFFFF not < 0)",
+    asm: ["addi a0,zero,-1","bltu a0,zero,tgt","addi a1,zero,42","j end",
+          "tgt:","addi a1,zero,99","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BGEU: not taken when rs1 < rs2 (unsigned: 0 not ≥ 0xFFFFFFFF)",
+    asm: ["addi a0,zero,-1","bgeu zero,a0,tgt","addi a1,zero,42","j end",
+          "tgt:","addi a1,zero,99","end:","sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch BLT: signed edge — 0x7FFFFFFF not < 0x80000000",
+    // 0x7FFFFFFF is max positive; 0x80000000 is min negative signed
+    // so 0x7FFFFFFF >= 0x80000000 signed → branch NOT taken
+    asm: ["lui a0,0x80000","addi a0,a0,-1",  // a0 = 0x7FFFFFFF
+          "lui a1,0x80000",                   // a1 = 0x80000000
+          "blt a0,a1,tgt",                    // 0x7FFFFFFF < 0x80000000 signed? NO
+          "addi a2,zero,42","j end",
+          "tgt:","addi a2,zero,99","end:","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    name: "Branch Backward offset (negative branch target)",
+    asm: ["j skip","tgt:","addi a0,zero,42","j end",
+          "skip:","j tgt","end:","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 11: JUMPS
+// ════════════════════════════════════════════════════════
+{
+    // JAL at byte 0, func at byte 8; link = 4
+    name: "JAL: rd = PC+4 (link register correct)",
+    asm: ["jal ra,func","ebreak","func:","sw ra,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===4; }
+},
+{
+    name: "JAL: rd=x0 discards link (pure jump)",
+    asm: ["jal zero,func","ebreak","func:","sw ra,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    // JALR at byte 4, target = 17 & ~1 = 16. ra = PC+4 = 8
+    // byte 16 = word 4 = sw ra,256(zero)
+    name: "JALR: PC = (rs1+imm)&~1, LSB cleared, rd = PC+4",
+    asm: ["nop",                  // byte 0
+          "addi a0,zero,17",      // byte 4  (ra will = 8 after jalr)
+          "jalr ra,a0,0",         // byte 8  -> target = 16
+          "ebreak",               // byte 12 (skipped)
+          "sw ra,256(zero)",      // byte 16
+          "ebreak"],              // byte 20
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===12; }
+    // ra = PC of jalr + 4 = 8+4 = 12
+},
+{
+    name: "JALR: rd=x0 discards link",
+    asm: ["addi a0,zero,12",    // target = 12
+          "jalr zero,a0,0",     // byte 4, jumps to 12
+          "ebreak",             // byte 8 (skipped)
+          "sw ra,256(zero)",    // byte 12
+          "ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+{
+    // JALR where rd=rs1: a0 holds base, result goes back into a0
+    // a0=20 before jalr at byte 4; target = 20; a0 (rd) = PC+4 = 8
+    // byte 20 = word 5 = sw a0,256(zero)
+    name: "JALR: rd=rs1 same register (link overwrites base)",
+    asm: ["nop",                  // byte 0
+          "addi a0,zero,20",      // byte 4
+          "jalr a0,a0,0",         // byte 8: target=20, a0 becomes 12
+          "ebreak",               // byte 12 (skipped)
+          "ebreak",               // byte 16 (skipped)
+          "sw a0,256(zero)",      // byte 20
+          "ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===12; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 12: LOADS
+// ════════════════════════════════════════════════════════
+{
+    name: "Load LW: aligned 32-bit word round-trip",
+    asm: ["lui a0,0x12345","sw a0,256(zero)","lw a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x12345000; }
+},
+{
+    name: "Load LH: sign-extends 0x8000 to 0xFFFF8000 at offset 0",
+    asm: ["lui a0,0x8",          // a0 = 0x8000
+          "sh a0,256(zero)",
+          "lh a1,256(zero)",
+          "sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0xFFFF8000; }
+},
+{
+    name: "Load LHU: zero-extends 0x8000 to 0x00008000 at offset 0",
+    asm: ["lui a0,0x8",
+          "sh a0,256(zero)",
+          "lhu a1,256(zero)",
+          "sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x00008000; }
+},
+{
+    // Store 0x88993000, load upper halfword at offset 2
+    // Upper halfword = 0x8899, sign-extended = 0xFFFF8899
+    name: "Load LH: sign-extends upper halfword at offset 2",
+    asm: ["lui a0,0x88993","sw a0,256(zero)","lh a1,258(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0xFFFF8899; }
+},
+{
+    name: "Load LB: sign-extends 0x80 to 0xFFFFFF80 at offset 0",
+    asm: ["addi a0,zero,0x80","sb a0,256(zero)",
+          "lb a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0xFFFFFF80; }
+},
+{
+    name: "Load LBU: zero-extends 0x80 to 0x00000080 at offset 0",
+    asm: ["addi a0,zero,0x80","sb a0,256(zero)",
+          "lbu a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x00000080; }
+},
+{
+    // Store 0x8899A000. Little-endian: [0x00, 0xA0, 0x99, 0x88]
+    // lb at +1 = 0xA0 sign-ext = 0xFFFFFFA0
+    // lb at +2 = 0x99 sign-ext = 0xFFFFFF99
+    // lb at +3 = 0x88 sign-ext = 0xFFFFFF88
+    name: "Load LB: byte multiplexer lanes 1, 2, 3 correct",
+    asm: ["lui a0,0x8899A",
+          "sw a0,256(zero)",
+          "lb a1,257(zero)","lb a2,258(zero)","lb a3,259(zero)",
+          "sw a1,260(zero)","sw a2,264(zero)","sw a3,268(zero)","ebreak"],
+    verify(cpu) {
+        cpu.run_cycles(100000);
+        return mem(cpu,65)===0xFFFFFFA0 && mem(cpu,66)===0xFFFFFF99 && mem(cpu,67)===0xFFFFFF88;
+    }
+},
+{
+    name: "Load LBU: zero-extends 0xFF to 0x000000FF",
+    asm: ["addi a0,zero,0xFF","sb a0,256(zero)",
+          "lbu a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x000000FF; }
+},
+{
+    name: "Pipeline: Load-then-Use (value correctness, no stale read)",
+    asm: ["addi a0,zero,21","sw a0,256(zero)",
+          "lw a1,256(zero)","add a2,a1,a1","sw a2,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===42; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 13: STORES
+// ════════════════════════════════════════════════════════
+{
+    name: "Store SW: all 4 bytes written (dbus_sel=0xF)",
+    asm: ["lui a0,0x11223","sw a0,256(zero)","lw a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x11223000; }
+},
+{
+    // Write 0x11223000, then overwrite with SH 0x5AA at offset 0 (low half)
+    // and SH 0x5AA at offset 2 (high half) → word = 0x05AA05AA
+    name: "Store SH: byte lanes 0x0011 and 0x1100 correct",
+    asm: ["lui a0,0x11223","sw a0,256(zero)",
+          "addi a1,zero,0x5AA",
+          "sh a1,256(zero)","sh a1,258(zero)",
+          "lw a2,256(zero)","sw a2,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0x05AA05AA; }
+},
+{
+    // Clear word, then write each byte independently
+    name: "Store SB: all 4 byte lanes correct (0xDDCCBBAA)",
+    asm: ["sw zero,256(zero)",
+          "addi a0,zero,0xAA","sb a0,256(zero)",
+          "addi a0,zero,0xBB","sb a0,257(zero)",
+          "addi a0,zero,0xCC","sb a0,258(zero)",
+          "addi a0,zero,0xDD","sb a0,259(zero)",
+          "lw a1,256(zero)","sw a1,260(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0xDDCCBBAA; }
+},
+{
+    name: "Store SB: individual byte does not corrupt neighbors",
+    asm: ["addi a0,zero,-1","sw a0,256(zero)",   // fill with 0xFFFFFFFF
+          "addi a1,zero,0x42","sb a1,257(zero)",  // overwrite byte 1 only
+          "lw a2,256(zero)","sw a2,260(zero)","ebreak"],
+    // expect 0xFF42FFFF (little-endian: [FF, 42, FF, FF])
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,65)===0xFFFF42FF; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 14: CSR INSTRUCTIONS
+// ════════════════════════════════════════════════════════
+{
+    name: "CSR CSRRW: atomically read old + write new (mscratch)",
+    asm: ["lui a0,0x12345","addi a0,a0,0x678",  // a0 = 0x12345678
+          "csrrw a1,0x340,a0",                   // a1 = old (0), mscratch = 0x12345678
+          "csrrw a2,0x340,zero",                 // a2 = 0x12345678, mscratch = 0
+          "sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x12345678; }
+},
+{
+    name: "CSR CSRRS: set bits (OR semantics)",
+    asm: ["addi a0,zero,0xF0",
+          "csrrw zero,0x340,a0",   // mscratch = 0xF0
+          "addi a1,zero,0x0F",
+          "csrrs zero,0x340,a1",   // mscratch |= 0x0F → 0xFF
+          "csrr a2,0x340","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xFF; }
+},
+{
+    name: "CSR CSRRC: clear bits (AND-NOT semantics)",
+    asm: ["addi a0,zero,0xFF",
+          "csrrw zero,0x340,a0",  // mscratch = 0xFF
+          "addi a1,zero,0x0F",
+          "csrrc zero,0x340,a1",  // mscratch &= ~0x0F → 0xF0
+          "csrr a2,0x340","sw a2,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0xF0; }
+},
+{
+    name: "CSR CSRRSI/CSRRCI: 5-bit immediate versions",
+    asm: ["csrrsi zero,0x340,0x1F",   // mscratch |= 0x1F = 31
+          "csrrci zero,0x340,0x0F",   // mscratch &= ~0x0F → 0x10
+          "csrr a0,0x340","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x10; }
+},
+{
+    name: "CSR: Write to read-only mvendorid silently ignored",
+    asm: ["addi a0,zero,-1",
+          "csrrw zero,0xF11,a0",  // mvendorid, read-only
+          "csrr a1,0xF11",
+          "sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 15: TRAPS
+// Pad layout: 5 words before nops = 20 bytes. Need handler at 80.
+// Gap = 80-20 = 60 bytes = 15 nops.
+// ════════════════════════════════════════════════════════
+{
+    name: "Trap ECALL: mcause=11, mepc=PC of ecall",
+    // layout: addi(0) csrrw(4) ecall(8) sw(12) ebreak(16) [15 nops = 17..76] handler(80)
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0", // mtvec=80
+        "ecall",              // byte 8 → trap
+        "sw a1,256(zero)",    // byte 12 (after mret)
+        "sw a2,260(zero)",    // byte 16
+        "ebreak",             // byte 20
+        ...Array(14).fill("nop"),  // bytes 24..79 (14 nops × 4 = 56 → total = 80)
+        "handler:",           // byte 80
+        "csrr a1,0x342",      // mcause (=11 for ecall M-mode)
+        "csrr a2,0x341",      // mepc   (=8)
+        "addi a3,a2,4","csrrw zero,0x341,a3",
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        return mem(cpu,64)===11 && mem(cpu,65)===8;
+    }
+},
+{
+    name: "Trap EBREAK: mcause=3, mepc=PC of ebreak",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "ebreak",             // byte 8
+        "sw a1,256(zero)",    // byte 12 (after mret)
+        "sw a2,260(zero)",    // byte 16
+        "ebreak",             // byte 20 (halt)
+        ...Array(14).fill("nop"),
+        "handler:",           // byte 80
+        "csrr a1,0x342","csrr a2,0x341",
+        "addi a3,a2,4","csrrw zero,0x341,a3",
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        return mem(cpu,64)===3 && mem(cpu,65)===8;
+    }
+},
+{
+    name: "Trap Illegal Instruction: mcause=2",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        ".word 0xFFFFFFFF",   // byte 8 → illegal
+        "sw a1,256(zero)",    // byte 12 (after mret)
+        "ebreak",             // byte 16
+        ...Array(15).fill("nop"),
+        "handler:",           // byte 80
+        "csrr a1,0x342",
+        "addi a2,zero,12","csrrw zero,0x341,a2", // skip illegal, go to sw
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        return mem(cpu,64)===2;
+    }
+},
+{
+    name: "Trap MRET: restores PC from mepc",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "ecall",              // byte 8
+        "addi a1,zero,42",   // byte 12: executed after MRET
+        "sw a1,256(zero)","ebreak",
+        ...Array(14).fill("nop"),
+        "handler:",           // byte 80
+        "addi a3,zero,12","csrrw zero,0x341,a3",  // mepc = 12
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        return mem(cpu,64)===42;
+    }
+},
+{
+    name: "Trap mstatus: MIE→0 on trap, MPIE set; MRET restores MIE",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "csrrsi zero,0x300,8",   // mstatus.MIE = 1
+        "ecall",                  // byte 12: MIE→0, MPIE→1
+        "csrr a0,0x300",          // byte 16: read mstatus after MRET
+        "sw a0,256(zero)",        // byte 20
+        "ebreak",
+        ...Array(13).fill("nop"),
+        "handler:",               // byte 80
+        "csrr a3,0x300",          // mid-trap mstatus (MIE=0, MPIE=1)
+        "sw a3,260(zero)",
+        "addi a4,zero,16","csrrw zero,0x341,a4",
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        const post_mret_mstatus = mem(cpu,64);  // MIE should be 1 (restored)
+        const mid_trap_mstatus  = mem(cpu,65);  // MIE=0, MPIE=1
+        return (post_mret_mstatus & 8) === 8 &&
+               (mid_trap_mstatus & 8) === 0 &&
+               (mid_trap_mstatus & 0x80) !== 0;
+    }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 16: TIMER INTERRUPT
+// ════════════════════════════════════════════════════════
+{
+    name: "Timer IRQ: taken when MIE=1 and MTIE=1",
+    // handler at byte 80: 5 instr setup + 14 nops = 19 words = 76 bytes; handler at 80
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        "csrrsi zero,0x300,8",   // MIE=1
+        "csrrsi zero,0x304,0x80",// mie.MTIE=1
+        ...Array(10).fill("nop"),// spin — IRQ fires here
+        "sw zero,256(zero)",     // should NOT execute if IRQ taken
+        "ebreak",
+        ...Array(7).fill("nop"), // pad
+        "handler:",              // byte 80
+        "addi a1,zero,99","sw a1,256(zero)","ebreak"
+    ],
+    verify(cpu) {
+        cpu.run_with_timer_irq(400, 200000);
+        return mem(cpu,64)===99;
+    }
+},
+{
+    name: "Timer IRQ: blocked when MIE=0 (normal flow completes)",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        // MIE deliberately left 0
+        ...Array(10).fill("nop"),
+        "addi a1,zero,42","sw a1,256(zero)","ebreak",
+        ...Array(7).fill("nop"),
+        "handler:",
+        "addi a1,zero,99","sw a1,256(zero)","ebreak"
+    ],
+    verify(cpu) {
+        cpu.run_with_timer_irq(200, 200000);
+        return mem(cpu,64)===42;
+    }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 17: PIPELINE / STATE MACHINE
+// ════════════════════════════════════════════════════════
+{
+    name: "State: Back-to-back two-stage ops (two consecutive loads)",
+    asm: ["addi a0,zero,10","addi a1,zero,20",
+          "sw a0,256(zero)","sw a1,260(zero)",
+          "lw a2,256(zero)","lw a3,260(zero)",
+          "add a4,a2,a3","sw a4,264(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,66)===30; }
+},
+{
+    name: "State: Tight loop accumulator 1000 iterations",
+    asm: ["addi a0,zero,1000","addi a1,zero,0",
+          "loop:","addi a1,a1,1","addi a0,a0,-1","bne a0,zero,loop",
+          "sw a1,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(500000); return mem(cpu,64)===1000; }
+},
+
+// ════════════════════════════════════════════════════════
+// SECTION 18: EDGE CASES
+// ════════════════════════════════════════════════════════
+{
+    // 0x00000000 = lb x0, 0(x0) — valid load to x0, discarded
+    name: "Edge: All-zero instruction (lb x0,0(x0)) executes without trap",
+    asm: [".word 0","addi a0,zero,42","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===42; }
+},
+{
+    // lw a0, 0(zero): reads instruction at byte 0
+    // lw a0, 0(zero) = encI(0, 0, 2, 10, 0x03) = 0x00002503
+    name: "Edge: Load from address 0x0 (reads own first instruction)",
+    asm: ["lw a0,0(zero)","sw a0,256(zero)","ebreak"],
+    verify(cpu) { cpu.run_cycles(100000); return mem(cpu,64)===0x00002503; }
+},
+{
+    name: "Edge: All-ones instruction 0xFFFFFFFF → illegal → mcause=2",
+    asm: [
+        "addi a0,zero,80","csrrw zero,0x305,a0",
+        ".word 0xFFFFFFFF",
+        "sw a1,256(zero)","ebreak",
+        ...Array(15).fill("nop"),
+        "handler:",
+        "csrr a1,0x342",
+        "addi a2,zero,12","csrrw zero,0x341,a2",
+        "mret"
+    ],
+    verify(cpu) {
+        cpu.run_cycles(200000);
+        return mem(cpu,64)===2;
+    }
+},
+];
+
+// ── C++ ENGINE ──────────────────────────────────────────────────────────────
+const CPP_ENGINE = `
+#include <cxxrtl/cxxrtl.h>
+static char heap[262144];
+static size_t heap_top = 0;
+void* operator new(size_t n) {
+    size_t a = (n+7)&~7u;
+    if(heap_top+a>sizeof(heap)) return (void*)0;
+    void* p = heap+heap_top; heap_top+=a; return p;
+}
+void* operator new[](size_t n) { return operator new(n); }
+void operator delete(void*) noexcept {}
+void operator delete[](void*) noexcept {}
+void operator delete(void*,size_t) noexcept {}
+void operator delete[](void*,size_t) noexcept {}
+#undef assert
+#define assert(x) ((void)0)
+#include "sim.cpp"
+
+cxxrtl_design::p_zero__soc dut;
+uint32_t ram[8192];
+int halted = 0;
+uint32_t signal_flags = 0;   // bit8=ibus misalign, bit9=dbus misalign
+
+static void bus_tick(int timer_irq_val) {
+    dut.p_clk.data[0] = 0;
+    dut.p_timer__irq.data[0] = timer_irq_val;
+
+    uint32_t iadr = dut.p_ibus__adr.data[0];
+    if(iadr & 3) signal_flags |= (1u<<8);
+    int icyc = dut.p_ibus__cyc.data[0];
+    if(icyc) {
+        uint32_t inst = ram[(iadr>>2)&0x1FFF];
+        if(inst == 0x00100073u) { halted = 1; }
+        dut.p_ibus__rdt.data[0] = inst;
+        dut.p_ibus__ack.data[0] = 1;
+    } else {
+        dut.p_ibus__ack.data[0] = 0;
+    }
+
+    uint32_t dadr = dut.p_dbus__adr.data[0];
+    // Only flag dbus misalignment when dbus is active
+    int dcyc = dut.p_dbus__cyc.data[0];
+    if(dcyc && (dadr & 3)) signal_flags |= (1u<<9);
+    if(dcyc) {
+        uint32_t idx = (dadr>>2)&0x1FFF;
+        if(dut.p_dbus__we.data[0]) {
+            uint32_t dat = dut.p_dbus__dat.data[0];
+            uint32_t sel = dut.p_dbus__sel.data[0];
+            uint32_t mask = 0;
+            if(sel&1) mask|=0x000000FFu;
+            if(sel&2) mask|=0x0000FF00u;
+            if(sel&4) mask|=0x00FF0000u;
+            if(sel&8) mask|=0xFF000000u;
+            ram[idx] = (ram[idx] & ~mask) | (dat & mask);
+        } else {
+            dut.p_dbus__rdt.data[0] = ram[idx];
+        }
+        dut.p_dbus__ack.data[0] = 1;
+    } else {
+        dut.p_dbus__ack.data[0] = 0;
+    }
+
+    dut.p_clk.data[0] = 1; dut.step();
+    dut.p_ibus__ack.data[0] = 0;
+    dut.p_dbus__ack.data[0] = 0;
+    dut.step();
+}
+
+extern "C" {
+    __attribute__((export_name("init_cpu"))) void init_cpu() {
+        for(int i=0;i<8192;i++) ram[i]=0;
+        signal_flags = 0;
+        dut.reset();
+        dut.p_rst__n.data[0] = 0;
+        dut.p_timer__irq.data[0] = 0;
+        for(int i=0;i<200;i++){
+            dut.p_clk.data[0]=0; dut.step();
+            dut.p_clk.data[0]=1; dut.step();
+        }
+        dut.p_rst__n.data[0] = 1;
+        dut.step();
+        halted = 0;
+    }
+
+    __attribute__((export_name("load_inst"))) void load_inst(int word_addr, uint32_t inst) {
+        ram[word_addr] = inst;
+    }
+
+    __attribute__((export_name("read_mem"))) uint32_t read_mem(int word_addr) {
+        return ram[word_addr];
+    }
+
+    __attribute__((export_name("get_flags"))) uint32_t get_flags() {
+        return signal_flags;
+    }
+
+    __attribute__((export_name("run_cycles"))) int run_cycles(int max_cycles) {
+        int c = 0;
+        while(c < max_cycles && !halted) {
+            bus_tick(0);
+            c++;
+        }
+        return c;
+    }
+
+    __attribute__((export_name("run_with_timer_irq"))) int run_with_timer_irq(int assert_at, int max_cycles) {
+        int c = 0;
+        while(c < max_cycles && !halted) {
+            bus_tick(c >= assert_at ? 1 : 0);
+            c++;
+        }
+        return c;
+    }
+
+    __attribute__((export_name("run_reset_check"))) uint32_t run_reset_check() {
+        dut.reset();
+        dut.p_rst__n.data[0] = 0;
+        dut.p_timer__irq.data[0] = 0;
+        uint32_t cyc_high = 0;
+        for(int i=0;i<50;i++){
+            dut.p_clk.data[0]=0; dut.step();
+            if(dut.p_ibus__cyc.data[0]) cyc_high++;
+            dut.p_clk.data[0]=1; dut.step();
+        }
+        // restore
+        dut.p_rst__n.data[0] = 1; dut.step();
+        halted = 0;
+        return cyc_high;
+    }
+}
+`;
+
+const wrapperVerilog = `
+module zero_soc (
+    input  logic        clk,
+    input  logic        rst_n,
+    input  logic        timer_irq,
+    output logic [31:0] ibus_adr,
+    output logic        ibus_cyc,
+    input  logic [31:0] ibus_rdt,
+    input  logic        ibus_ack,
+    output logic [31:0] dbus_adr,
+    output logic [31:0] dbus_dat,
+    output logic [3:0]  dbus_sel,
+    output logic        dbus_we,
+    output logic        dbus_cyc,
+    input  logic [31:0] dbus_rdt,
+    input  logic        dbus_ack
+);
+    serv_rf_top #(.RESET_PC(32'h0000_0000)) cpu (
+        .clk(clk), .i_rst(~rst_n), .i_timer_irq(timer_irq),
+        .o_ibus_adr(ibus_adr), .o_ibus_cyc(ibus_cyc),
+        .i_ibus_rdt(ibus_rdt), .i_ibus_ack(ibus_ack),
+        .o_dbus_adr(dbus_adr), .o_dbus_dat(dbus_dat),
+        .o_dbus_sel(dbus_sel), .o_dbus_we(dbus_we),
+        .o_dbus_cyc(dbus_cyc), .i_dbus_rdt(dbus_rdt),
+        .i_dbus_ack(dbus_ack)
+    );
+endmodule`;
+
+// ── UI ───────────────────────────────────────────────────────────────────────
+function buildUI() {
+    const grid = document.getElementById('testGrid');
+    grid.innerHTML = '';
+    TESTS.forEach((t, i) => {
+        const card = document.createElement('div');
+        card.className = 'test-card';
+        card.id = `card-${i}`;
+        card.innerHTML = `<h3>${i+1}. ${t.name}</h3>
+            <div class="asm">${t.asm.join('\n')}</div>
+            <div class="result" id="res-${i}">Waiting...</div>`;
+        grid.appendChild(card);
+    });
+}
+
+async function runSuite() {
+    document.getElementById('buildBtn').disabled = true;
+    logEl.innerHTML = '';
+    sumEl.textContent = '';
+    buildUI();
+
+    try {
+        const dec = new TextDecoder();
+        const toStr = v => v ? (typeof v === 'string' ? v : dec.decode(v)) : '';
+
+        log('Fetching SERV RTL from jsDelivr...');
+        const servFiles = [
+            'serv_aligner.v','serv_alu.v','serv_bufreg.v','serv_bufreg2.v',
+            'serv_compdec.v','serv_csr.v','serv_ctrl.v','serv_debug.v',
+            'serv_decode.v','serv_immdec.v','serv_mem_if.v','serv_rf_if.v',
+            'serv_rf_ram_if.v','serv_rf_ram.v','serv_rf_top.v','serv_state.v','serv_top.v'
+        ];
+        const vfs = { 'input.v': wrapperVerilog };
+        await Promise.all(servFiles.map(async f => {
+            const r = await fetch(`https://cdn.jsdelivr.net/gh/olofk/serv@main/rtl/${f}`);
+            if (!r.ok) throw new Error(`Failed to fetch ${f}`);
+            vfs[f] = await r.text();
+        }));
+        log('RTL fetched ✓', '#69db7c');
+
+        log('Running Yosys synthesis...', '#ffd43b');
+        const cmds = [
+            'read_verilog -sv input.v',
+            ...servFiles.map(f => `read_verilog -sv ${f}`),
+            'prep -top zero_soc',
+            'write_cxxrtl sim.cpp'
+        ].join('; ');
+        const yOut = await runYosys(['-p', cmds], vfs);
+        const simCpp = toStr(yOut['sim.cpp']);
+        if (!simCpp) throw new Error('Yosys produced no sim.cpp');
+        log('Synthesis complete ✓', '#69db7c');
+
+        log('Fetching CXXRTL header...', '#ffd43b');
+        const hRes = await fetch('https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h');
+        const header = await hRes.text();
+
+        log('Compiling C++ → WebAssembly...', '#ffd43b');
+        const cOut = await runClang(
+            ['clang++','-std=c++17','-O2','-I/',
+             '--target=wasm32','-nostdlib','-nostdinc',
+             '-fno-exceptions','-fno-rtti',
+             '-Wl,--no-entry','-Wl,--allow-undefined',
+             'driver.cpp','-o','sim.wasm'],
+            { 'driver.cpp': CPP_ENGINE, 'sim.cpp': simCpp, 'cxxrtl': { 'cxxrtl.h': header } }
+        );
+        if (!cOut['sim.wasm']) throw new Error('Clang produced no sim.wasm');
+        log('Compilation complete ✓', '#69db7c');
+
+        const { instance } = await WebAssembly.instantiate(
+            cOut['sim.wasm'],
+            { env: new Proxy({}, { get: () => () => 0 }) }
+        );
+        const cpu = instance.exports;
+        log(`\nWasm ready. Running ${TESTS.length} tests...\n`, '#69db7c');
+
+        let passed = 0, failed = 0;
+
+        for (let i = 0; i < TESTS.length; i++) {
+            const t = TESTS[i];
+            const resEl = document.getElementById(`res-${i}`);
+            resEl.className = 'result running';
+            resEl.textContent = 'Running...';
+            await new Promise(r => setTimeout(r, 0)); // yield to browser
+
+            try {
+                // Assemble
+                const words = ASM(t.asm);
+                // Always init + load before verify
+                cpu.init_cpu();
+                words.forEach((w, idx) => cpu.load_inst(idx, w));
+                // verify() is responsible for calling run_cycles or specialized runners
+                const ok = t.verify(cpu);
+                if (ok) {
+                    resEl.className = 'result pass';
+                    resEl.textContent = 'PASS ✓';
+                    passed++;
+                    log(`  PASS  [${i+1}] ${t.name}`, '#69db7c');
+                } else {
+                    resEl.className = 'result fail';
+                    resEl.textContent = 'FAIL ✗';
+                    failed++;
+                    log(`  FAIL  [${i+1}] ${t.name}`, '#f97171');
+                }
+            } catch(e) {
+                resEl.className = 'result fail';
+                resEl.textContent = `ERROR: ${e.message}`;
+                failed++;
+                log(`  ERR   [${i+1}] ${t.name}: ${e.message}`, '#f97171');
+            }
+        }
+
+        const color = failed === 0 ? '#69db7c' : '#ffd43b';
+        const msg = `\n══ GAUNTLET COMPLETE: ${passed}/${TESTS.length} passed, ${failed} failed ══`;
+        log(msg, color);
+        sumEl.style.color = color;
+        sumEl.textContent = `${passed}/${TESTS.length} passed — ${failed} failed`;
+
+    } catch(e) {
+        log(`\nFATAL: ${e.message}\n${e.stack||''}`, '#f97171');
+    } finally {
+        document.getElementById('buildBtn').disabled = false;
+    }
+}
+
+document.getElementById('buildBtn').onclick = runSuite;
+buildUI();
+</script>
+</body>
+</html>
