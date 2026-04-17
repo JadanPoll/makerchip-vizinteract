@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>SERV RISC-V — Zephyr Studio</title>
+    <title>SERV RISC-V — Zephyr Studio (Generic Build)</title>
     <style>
         body { font-family: system-ui, sans-serif; background: #0d0f1a; color: #fff; padding: 20px; display: flex; flex-direction: column; align-items: center; }
         h2 { color: #9cdcfe; margin-top: 0; font-family: monospace; letter-spacing: 1px; }
@@ -14,6 +14,8 @@
         .btn-run  { background: #2e7d32; } .btn-run:hover:not(:disabled)  { background: #388e3c; }
         .btn-load { background: #6a1b9a; } .btn-load:hover:not(:disabled) { background: #8e24aa; }
         .btn-pause{ background: #b08d00; } .btn-pause:hover:not(:disabled){ background: #d4aa00; }
+        .btn-diag { background: #c62828; } .btn-diag:hover:not(:disabled) { background: #d32f2f; }
+        .btn-dl   { background: #455a64; } .btn-dl:hover:not(:disabled)   { background: #607d8b; }
 
         .console-container { display: flex; flex-wrap: wrap; gap: 20px; width: 100%; max-width: 1200px; }
         .panel { background: #1e2030; border: 2px solid #2a3050; border-radius: 8px; padding: 15px; flex: 1 1 400px; box-sizing: border-box; }
@@ -52,6 +54,8 @@
         <button id="btnPause" class="sim-ctrl btn-pause" disabled>⏸ Pause</button>
         <button id="btnTickInst" class="sim-ctrl" disabled>⏭ Step Inst</button>
         <button id="btnTickCyc" class="sim-ctrl"  disabled>⏭ Tick Cycle</button>
+        <button id="diagBtn" class="sim-ctrl btn-diag" disabled>🔬 Dump Diagnostics</button>
+        <button id="dlSimBtn" class="btn-dl" disabled>💾 Download sim.cpp</button>
     </div>
 
     <div class="console-container">
@@ -104,13 +108,14 @@ import { runClang } from 'https://cdn.jsdelivr.net/npm/@yowasp/clang/gen/bundle.
 const term       = document.getElementById('terminal');
 const bootBtn    = document.getElementById('bootBtn');
 const uartInput  = document.getElementById('uartInput');
+const dlSimBtn   = document.getElementById('dlSimBtn');
 
 let cpu      = null;
 let wasmInst = null;
 let memBaseAddr = 0x00000000;
 let runSpeed    = 0;
 let last_tx     = 0;
-let diagCycleCount = 0;
+let rawSimCpp   = null;
 
 // ── C++ DRIVER ─────────────────────────────────────────────────────────────
 const DRIVER_CPP = `
@@ -141,6 +146,20 @@ int  tx_idx  = 0;
 int  uart_rx = -1;
 uint32_t uart_lcr = 0;
 
+// Diagnostics
+uint32_t mtime_read_count = 0;
+uint32_t last_mcause = 0;
+uint32_t uart_log[60]; // 20 entries x 3 words
+int uart_log_idx = 0;
+uint32_t first_irq_cycle = 0;
+uint32_t irq_count = 0;
+static int prev_irq = 0;
+
+struct AccessLog { uint32_t addr; uint32_t we; uint32_t val; uint32_t cycle; };
+AccessLog unknown_log[256];
+int unknown_log_idx = 0;
+uint32_t sim_cycle = 0;
+
 // mtime / mtimecmp
 uint32_t mtime_lo    = 0;
 uint32_t mtime_hi    = 0;
@@ -149,6 +168,7 @@ uint32_t mtimecmp_hi = 0xFFFFFFFFu;
 
 // Internal state
 int     prev_dcyc   = 0;
+int     prev_icyc   = 0;
 uint32_t latched_rx  = 0xFFFFFFFFu;
 uint32_t current_pc  = 0;
 
@@ -158,17 +178,34 @@ static inline void tick_mtime() {
     mt++;
     mtime_lo = (uint32_t)mt;
     mtime_hi = (uint32_t)(mt >> 32);
-    dut.p_timer__irq.data[0] = (mt >= cmp) ? 1 : 0;
+    
+    int cur_irq = (mt >= cmp) ? 1 : 0;
+    if(cur_irq && !prev_irq) {
+        irq_count++;
+        if(irq_count == 1) first_irq_cycle = mtime_lo;
+        last_mcause = 0x80000007u; // timer IRQ
+    }
+    prev_irq = cur_irq;
+    dut.p_timer__irq.data[0] = cur_irq;
 }
 
 extern "C" {
     __attribute__((export_name("init"))) void init() {
         for(int i=0;i<65536;i++) rom[i]=sram[i]=0;
         for(int i=0;i<38400;i++) vram[i]=0;
-        tx_idx=0; uart_rx=-1; prev_dcyc=0; current_pc=0;
+        tx_idx=0; uart_rx=-1; prev_dcyc=0; prev_icyc=0; current_pc=0;
         uart_lcr=0;
         mtime_lo=0; mtime_hi=0;
         mtimecmp_lo=0xFFFFFFFFu; mtimecmp_hi=0xFFFFFFFFu;
+        
+        mtime_read_count = 0;
+        last_mcause = 0;
+        uart_log_idx = 0;
+        first_irq_cycle = 0;
+        irq_count = 0;
+        prev_irq = 0;
+        unknown_log_idx = 0;
+        sim_cycle = 0;
 
         dut.reset();
         for(size_t i=0;i<576;i++)
@@ -188,6 +225,58 @@ extern "C" {
     __attribute__((export_name("get_pc")))  uint32_t get_pc()    { return current_pc; }
     __attribute__((export_name("get_mtime_lo"))) uint32_t get_mtime_lo(){ return mtime_lo; }
     __attribute__((export_name("get_mtime_hi"))) uint32_t get_mtime_hi(){ return mtime_hi; }
+    
+    // Diag Exports
+    __attribute__((export_name("get_mtime_read_count"))) uint32_t get_mtime_read_count(){ return mtime_read_count; }
+    __attribute__((export_name("get_mcause"))) uint32_t get_mcause(){ return last_mcause; }
+    __attribute__((export_name("get_uart_log_count"))) int get_uart_log_count(){ return uart_log_idx/3; }
+    __attribute__((export_name("get_uart_log_entry"))) uint32_t get_uart_log_entry(int i, int field){ 
+        if(i*3+field >= uart_log_idx) return 0xDEADBEEF;
+        return uart_log[i*3+field]; 
+    }
+    __attribute__((export_name("get_irq_count"))) uint32_t get_irq_count(){ return irq_count; }
+    __attribute__((export_name("get_first_irq_cycle"))) uint32_t get_first_irq_cycle(){ return first_irq_cycle; }
+    
+    __attribute__((export_name("get_unknown_count"))) int get_unknown_count(){ return unknown_log_idx; }
+    __attribute__((export_name("get_unknown_addr")))  uint32_t get_unknown_addr(int i){ return i<unknown_log_idx?unknown_log[i].addr:0; }
+    __attribute__((export_name("get_unknown_we")))    uint32_t get_unknown_we(int i)  { return i<unknown_log_idx?unknown_log[i].we:0; }
+    __attribute__((export_name("get_unknown_val")))   uint32_t get_unknown_val(int i)  { return i<unknown_log_idx?unknown_log[i].val:0; }
+    __attribute__((export_name("get_unknown_cycle"))) uint32_t get_unknown_cycle(int i){ return i<unknown_log_idx?unknown_log[i].cycle:0; }
+
+    __attribute__((export_name("get_rcnt"))) uint32_t get_rcnt() {
+        return dut.p_cpu_2e_rf__ram__if_2e_rcnt.curr.data[0];
+    }
+    __attribute__((export_name("get_wcnt"))) uint32_t get_wcnt() {
+        return dut.p_cpu_2e_rf__ram__if_2e_wcnt.data[0];
+    }
+    __attribute__((export_name("get_wen1_r"))) uint32_t get_wen1_r() {
+        return dut.p_cpu_2e_rf__ram__if_2e_wen1__r.curr.data[0];
+    }
+    __attribute__((export_name("get_o_wen1"))) uint32_t get_o_wen1() {
+        return dut.p_cpu_2e_cpu_2e_rf__if_2e_o__wen1.data[0];
+    }
+    __attribute__((export_name("get_cnt_en"))) uint32_t get_cnt_en() {
+        return dut.p_cpu_2e_cpu_2e_state_2e_o__cnt__en.data[0];
+    }
+
+    __attribute__((export_name("get_cnt_lsb"))) uint32_t get_cnt_lsb() {
+        return dut.p_cpu_2e_cpu_2e_state_2e_gen__cnt__w__eq__1_2e_cnt__lsb.curr.data[0];
+    }
+    __attribute__((export_name("get_rgnt"))) uint32_t get_rgnt() {
+        return dut.p_cpu_2e_rf__ram__if_2e_rgnt.curr.data[0];
+    }
+    __attribute__((export_name("get_rreq_r"))) uint32_t get_rreq_r() {
+        return dut.p_cpu_2e_rf__ram__if_2e_rreq__r.curr.data[0];
+    }
+    __attribute__((export_name("get_wen1_r_raw"))) uint32_t get_wen1_r_raw() {
+        return dut.p_cpu_2e_rf__ram__if_2e_wen1__r.curr.data[0];
+    }
+    __attribute__((export_name("get_wdata1_r"))) uint32_t get_wdata1_r() {
+        return dut.p_cpu_2e_rf__ram__if_2e_wdata1__r.curr.data[0];
+    }
+    __attribute__((export_name("get_rtrig1"))) uint32_t get_rtrig1() {
+        return dut.p_cpu_2e_rf__ram__if_2e_rtrig1.curr.data[0];
+    }
 
     __attribute__((export_name("get_reg"))) uint32_t get_reg(int r) {
         if(r==0) return 0;
@@ -277,14 +366,22 @@ extern "C" {
     __attribute__((export_name("step"))) void step() {
         tick_mtime();
         dut.p_clk.data[0]=0; dut.step();
-        if(dut.p_ibus__cyc.data[0]){
-            current_pc=dut.p_ibus__adr.data[0];
+        
+        uint32_t icyc = dut.p_ibus__cyc.data[0];
+        if(icyc && !prev_icyc) {
+            // First cycle ibus_cyc high: present data but DON'T ack yet
+            current_pc = dut.p_ibus__adr.data[0];
             if(current_pc >= 0x80000000u)
-                dut.p_ibus__rdt.data[0]=sram[(current_pc>>2)&0xFFFF];
+                dut.p_ibus__rdt.data[0] = sram[(current_pc>>2)&0xFFFF];
             else
-                dut.p_ibus__rdt.data[0]=rom[(current_pc>>2)&0xFFFF];
-            dut.p_ibus__ack.data[0]=1;
+                dut.p_ibus__rdt.data[0] = rom[(current_pc>>2)&0xFFFF];
         }
+        if(icyc && prev_icyc) {
+            // Second cycle ibus_cyc high: NOW ack
+            dut.p_ibus__ack.data[0] = 1;
+        }
+        prev_icyc = icyc;
+        
         uint32_t dcyc=dut.p_dbus__cyc.data[0];
         if(dcyc){
             uint32_t dadr=dut.p_dbus__adr.data[0];
@@ -299,7 +396,7 @@ extern "C" {
             if(dadr<0x00040000u){ if(!dwe) dut.p_dbus__rdt.data[0]=rom[dadr>>2]; }
             else if(dadr==0x02000000u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_lo; }
             else if(dadr==0x02000004u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_hi; }
-            else if(dadr==0x0200bff8u){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_lo; } // CLINT MTIME LO
+            else if(dadr==0x0200bff8u){ if(!dwe){ mtime_read_count++; dut.p_dbus__rdt.data[0]=mtime_lo; }} // CLINT MTIME LO
             else if(dadr==0x0200bffcu){ if(!dwe) dut.p_dbus__rdt.data[0]=mtime_hi; } // CLINT MTIME HI
             else if(dadr==0x02004000u){
                 if(dwe) mtimecmp_lo=(mtimecmp_lo & ~byte_mask())|(ddat & byte_mask());
@@ -310,16 +407,19 @@ extern "C" {
                 else if(!dwe) dut.p_dbus__rdt.data[0]=mtimecmp_hi;
             }
             else if((dadr & 0xFFFFFFF0u)==0x10000000u){
-                // Reconstruct the true byte offset using Quirk #13 (dbus_sel)
                 uint32_t byte_offset = 0;
                 if (sel & 2) byte_offset = 1;
                 else if (sel & 4) byte_offset = 2;
                 else if (sel & 8) byte_offset = 3;
                 
                 uint32_t reg = (dadr & 0xF) + byte_offset;
-                
-                // Pre-extract the byte value from the correct lane for writes
                 uint32_t byte_val = (ddat >> (byte_offset * 8)) & 0xFF;
+
+                if(!prev_dcyc && uart_log_idx < 60) {
+                    uart_log[uart_log_idx++] = reg;
+                    uart_log[uart_log_idx++] = dwe;
+                    uart_log[uart_log_idx++] = byte_val;
+                }
 
                 if(dwe && !prev_dcyc){
                     if(reg==3) uart_lcr=byte_val;
@@ -327,17 +427,17 @@ extern "C" {
                         if(tx_idx<65535) uart_tx[tx_idx++]=(char)byte_val; 
                     }
                 } else if(!dwe){
+                    uint32_t shift = (sel&2)?8 : (sel&4)?16 : (sel&8)?24 : 0;
                     if(reg==0 && !(uart_lcr&0x80)){
                         if(!prev_dcyc){ latched_rx=(uart_rx==-1)?0:uart_rx; uart_rx=-1; }
-                        uint32_t b=latched_rx&0xFF; dut.p_dbus__rdt.data[0]=b|(b<<8)|(b<<16)|(b<<24);
+                        dut.p_dbus__rdt.data[0] = (latched_rx & 0xFF) << shift;
                     }
                     else if(reg==3){ 
-                        uint32_t v=uart_lcr; dut.p_dbus__rdt.data[0]=v|(v<<8)|(v<<16)|(v<<24); 
+                        dut.p_dbus__rdt.data[0] = (uart_lcr & 0xFF) << shift; 
                     }
                     else if(reg==5){ 
-                        // Return 0x60 (THRE and TEMT bits set) duplicated across all lanes
                         uint32_t lsr=0x60|(uart_rx!=-1?1:0); 
-                        dut.p_dbus__rdt.data[0]=lsr|(lsr<<8)|(lsr<<16)|(lsr<<24); 
+                        dut.p_dbus__rdt.data[0] = (lsr & 0xFF) << shift; 
                     }
                     else dut.p_dbus__rdt.data[0]=0;
                 }
@@ -350,22 +450,46 @@ extern "C" {
                 uint32_t idx=(dadr-0x80000000u)>>2;
                 if(dwe){ uint32_t m=byte_mask(); sram[idx]=(sram[idx]&~m)|(ddat&m); } else dut.p_dbus__rdt.data[0]=sram[idx];
             }
+            else if(dadr != 0 && unknown_log_idx < 256) {
+                unknown_log[unknown_log_idx++] = {dadr, dwe, ddat, sim_cycle};
+            }
             dut.p_dbus__ack.data[0]=1;
         } else { dut.p_dbus__ack.data[0]=0; }
         prev_dcyc=dcyc;
         dut.p_clk.data[0]=1; dut.step();
         dut.p_ibus__ack.data[0]=0; dut.p_dbus__ack.data[0]=0;
+        sim_cycle++;
     }
 }
 `;
 
-// ── UI HELPERS ──────────────────────────────────────────────────────────
+// ── DIAGNOSTICS & UI HELPERS ──────────────────────────────────────────────
 const ABI = ["zero","ra","sp","gp","tp","t0","t1","t2","s0","s1","a0","a1","a2","a3","a4","a5","a6","a7","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","t3","t4","t5","t6"];
+
+const DIAG = {
+    enabled: true,
+    lastPc: 0,
+    uartWrites: 0,
+    mtimeReads: 0,
+    mtimecmpWrites: 0,
+    firstUartWrite: null,
+    firstTimerInit: null,
+    trapCount: 0,
+    lastTrapPc: 0,
+    cycleCount: 0,
+    pcHistory: [],
+    stallCount: 0,
+    loggedAddresses: new Set(),
+    bootTrace: [],          
+    loopCounts: new Map()   
+};
+
 function initRegisters() {
     const v = document.getElementById('regView');
     v.innerHTML = `<div class="reg-cell"><span class="reg-name">PC</span><span class="reg-val" id="reg-pc">00000000</span></div>`;
     for(let i=0;i<32;i++) v.innerHTML += `<div class="reg-cell"><span class="reg-name">${ABI[i]}</span><span class="reg-val" id="reg-${i}">00000000</span></div>`;
 }
+
 function refreshRegisters() {
     if(!cpu) return;
     document.getElementById('reg-pc').textContent = (cpu.get_pc()>>>0).toString(16).padStart(8,'0');
@@ -402,6 +526,7 @@ function initMemoryGrid() {
         refreshMemoryGrid();
     });
 }
+
 function refreshMemoryGrid() {
     if(!cpu) return;
     for(let i=0;i<8;i++){
@@ -415,45 +540,21 @@ function refreshMemoryGrid() {
 }
 
 // ── BINARY LOADER ──────────────────────────────────────────────────────────
-
-let totalCycles = 0;
-let halted = false;
-
-function loadBinaryIntoROM(arrayBuffer) {
+function loadBinaryIntoSRAM(arrayBuffer) {
     const bytes = new Uint8Array(arrayBuffer);
     const count = Math.floor(bytes.length / 4);
+
     cpu.init();
-    
-    let mhartidHits = 0;
     for(let i=0; i<count; i++){
-        let w = (bytes[i*4]) | (bytes[i*4+1]<<8) | (bytes[i*4+2]<<16) | (bytes[i*4+3]<<24);
-        w >>>= 0;
-
-        // EXACT MASK: 0xFFFFF07F clears bits 11:7 completely
-        if (((w & 0xFFFFF07F) >>> 0) === 0xF1402073) {
-            const rd = (w >> 7) & 0x1F;
-            w = ((rd << 7) | 0x00000013) >>> 0; 
-            mhartidHits++;
-        }
-
-        // HARDWARE BUG FIX: NOP out the csrw mtvec at 0x80000010 (word 4)
-        if (i === 4) {
-            w = 0x00000013; 
-        }
-
-        cpu.load_sram(i, w);
+        const w = (bytes[i*4]) | (bytes[i*4+1]<<8) | 
+                  (bytes[i*4+2]<<16) | (bytes[i*4+3]<<24);
+        cpu.load_sram(i, w >>> 0);
     }
-
-    // ROM Boot Trampoline
-    cpu.load_rom(0, 0x800002b7); 
-    cpu.load_rom(1, 0x00028067); 
-
-    // Manually lock mtvec to correct entry point
-    cpu.set_mtvec(0x8000001c); 
-    
-    term.textContent += `[LOADER] Global Scan: Neutralized ${mhartidHits} mhartid reads.\n`;
-    term.textContent += `[LOADER] mtvec manually locked to 0x8000001c\n`;
+    term.textContent += `[LOADER] Loaded ${count} words (${bytes.length} bytes) into SRAM @ 0x80000000\n`;
     last_tx = 0;
+    // Trampoline to jump to where our .bin is virtual addr set up to run from
+    cpu.load_rom(0, 0x80000297); // auipc t0, 0x80000
+    cpu.load_rom(1, 0x00028067); // jalr  x0, t0, 0
 }
 
 document.getElementById('loadBinInput').addEventListener('change', async e => {
@@ -461,12 +562,19 @@ document.getElementById('loadBinInput').addEventListener('change', async e => {
     if(!file) return;
     const buf = await file.arrayBuffer();
 
-    loadBinaryIntoROM(buf);
-    
+    // Reset diagnostics before boot
+    DIAG.cycleCount = 0;
+    DIAG.stallCount = 0;
+    DIAG.trapCount = 0;
+    DIAG.pcHistory = [];
+    DIAG.loggedAddresses.clear();
+    DIAG.bootTrace = [];
+    DIAG.loopCounts.clear();
+    DIAG.firstUartWrite = null;
+    DIAG.firstTimerInit = null;
+
+    loadBinaryIntoSRAM(buf);
     runSpeed = 0; 
-    totalCycles = 0;
-    halted = false;
-    diagCycleCount = 0;
     
     term.textContent += `[SYSTEM] Ready to Fast Run ${file.name}...\n`;
 });
@@ -502,12 +610,35 @@ endmodule`
         const toStr = v => v instanceof Uint8Array ? new TextDecoder().decode(v) : v;
         const simCpp = toStr(yOut['sim.cpp']);
 
+        console.log('[SIM.CPP SIGNALS]', simCpp.match(/p_cpu[^;\s]*(rcnt|wen1|wcnt|cnt_en)[^;\s]*/g));
+        const wcntLines = simCpp.split('\n').filter(l => l.includes('rf__ram__if_2e_wcnt') && !l.includes('slice') && !l.includes('concat'));
+        console.log('[WCNT FULL]', wcntLines.slice(0, 10));
+
+        rawSimCpp = simCpp;
+        dlSimBtn.disabled = false;
+
+        const evalFunctions = [];
+        let currentEval = '';
+        simCpp.split('\n').forEach((line, i) => {
+            if(line.includes('bool eval') || line.includes('void eval')) currentEval = line.trim();
+            if(line.includes('wcnt = sub_uu') || 
+               line.includes('o__cnt__en = reduce') ||
+               line.includes('wen1__r.next') ||
+               line.includes('rcnt.next') ||
+               line.includes('rgnt.next')) {
+                evalFunctions.push(`line ${i+1} [${currentEval}]: ${line.trim()}`);
+            }
+        });
+        console.log('[EVAL FUNCTIONS]', evalFunctions);
+
         const hRes = await fetch('https://cdn.jsdelivr.net/gh/JadanPoll/makerchip-vizinteract@main/cxxrtl_bare_baremetal.h');
         const cOut = await runClang(['clang++','-O3','-I/','--target=wasm32','-nostdlib','-fno-exceptions','-fno-rtti','-Wl,--no-entry','driver.cpp','-o','sim.wasm'],
             {'driver.cpp': DRIVER_CPP, 'sim.cpp': simCpp, 'cxxrtl': {'cxxrtl.h': await hRes.text()}});
 
         const { instance } = await WebAssembly.instantiate(cOut['sim.wasm'], {});
         cpu = instance.exports; wasmInst = instance;
+        window._cpu = cpu;
+        window._wasmInst = instance;
         cpu.init();
 
         term.textContent += `[SYSTEM] SoC ready.\n---------------------------------------------------------\n`;
@@ -517,14 +648,22 @@ endmodule`
     } catch(e) { term.textContent += `\n[FATAL] ${e.message}`; } finally { bootBtn.disabled = false; }
 }
 
-// ── MAIN TICK LOOP WITH EMPIRICAL HARDWARE HEALER ──────────────────────────
+dlSimBtn.onclick = () => {
+    if (!rawSimCpp) return;
+    const blob = new Blob([rawSimCpp], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sim.cpp';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+};
+
+// ── MAIN DIAGNOSTIC TICK LOOP ──────────────────────────────────────────────
 function updateOutputs() {
     if(!cpu) return;
-    diagCycleCount++;
-    // if(diagCycleCount <= 10 || diagCycleCount % 50 === 0){
-    //     const pc = (cpu.get_pc()>>>0).toString(16).padStart(8,'0');
-    //     console.log(`frame ${diagCycleCount}: PC=0x${pc}`);
-    // }
     refreshMemoryGrid();
     refreshRegisters();
     let now = cpu.read_tx_idx();
@@ -533,73 +672,175 @@ function updateOutputs() {
         term.scrollTop = term.scrollHeight;
     }
 }
-// ── ISA & BUS MAPPING PROBE ───────────────────────────────────────
-// ── ISA, BUS & HEALER MAPPING PROBE ───────────────────────────────────────
 
+function diagStep() {
+    const prePc = cpu.get_pc() >>> 0;
+    
+    cpu.step();
+    
+    DIAG.cycleCount++;
+    const postPc = cpu.get_pc() >>> 0;
 
-function tick() {
-    if(cpu && runSpeed > 0 && !halted){
-        for(let i=0; i<runSpeed; i++) {
-            const pc = cpu.get_pc() >>> 0;
+    // 1. PC stall detection
+    if(postPc === prePc) {
+        DIAG.stallCount++;
+        if(DIAG.stallCount === 10000) {
+            console.error(`[STALL] PC stuck at 0x${postPc.toString(16)} for 10000 cycles`);
+            console.log(`Registers at stall:`);
+            for(let r=0;r<32;r++) console.log(`  x${r}=0x${(cpu.get_reg(r)>>>0).toString(16)}`);
+        }
+    } else {
+        DIAG.stallCount = 0;
+    }
 
-            // --- 1. THE MEPC HEALER (Required to survive trap return) ---
-            if (pc === 0x80000224) { 
-                let mepc = cpu.get_rf_reg(34) >>> 0;
-                if (mepc > 0 && mepc < 0x80000000) {
-                    cpu.set_rf_reg(34, (mepc | 0x80000000) >>> 0); 
-                }
+    // 2. PC history ring buffer
+    DIAG.pcHistory.push(prePc);
+    if(DIAG.pcHistory.length > 8) DIAG.pcHistory.shift();
+
+    // 3. Derailment
+    if(prePc >= 0x80000000 && postPc < 0x80000000) {
+        console.error(`[DERAILMENT] cycle=${DIAG.cycleCount}`);
+        console.error(`  Jumped from 0x${prePc.toString(16)} to 0x${postPc.toString(16)}`);
+        console.error(`  PC history: ${DIAG.pcHistory.map(p=>'0x'+p.toString(16)).join(' -> ')}`);
+        console.error(`  mtvec=0x${(cpu.get_mtvec()>>>0).toString(16)}`);
+        console.error(`  All registers:`);
+        for(let r=0;r<32;r++) console.error(`    x${r}(${ABI[r]})=0x${(cpu.get_reg(r)>>>0).toString(16)}`);
+        console.error(`  SRAM[0]=0x${(cpu.debug_read(0x80000000)>>>0).toString(16)}`);
+        console.error(`  mtime=0x${(cpu.get_mtime_lo()>>>0).toString(16)}`);
+    }
+
+    // Every unique PC visited in 0x80000000-0x80001200 range
+    if(postPc >= 0x80000000 && postPc <= 0x80001200) {
+        if(!DIAG.loggedAddresses.has(postPc)) {
+            DIAG.loggedAddresses.add(postPc);
+            DIAG.bootTrace.push({cycle: DIAG.cycleCount, pc: postPc});
+        }
+    }
+
+    // SP sanity check every 10000 cycles
+    if(DIAG.cycleCount % 10000 === 0) {
+        const sp = cpu.get_reg(2)>>>0;
+        if(sp !== 0) {
+            if(sp < 0x80000000 || sp > 0x80040000) {
+                console.error(`[STACK CORRUPT] cycle=${DIAG.cycleCount} sp=0x${sp.toString(16)}`);
             }
-
-            // --- 2. ISA PROBE: Monitor the 'mul' instruction at 0x80002768 ---
-            if (pc === 0x80002768) {
-                const a5_pre = cpu.get_reg(15) >>> 0;
-                const a3_pre = cpu.get_reg(13) >>> 0;
-                
-                // Step through the instruction until PC changes
-                for(let j=0; j<100; j++) { cpu.step(); totalCycles++; if((cpu.get_pc() >>> 0) !== pc) break; }
-                
-                const a5_post = cpu.get_reg(15) >>> 0;
-                const expected = Math.imul(a5_pre, a3_pre) >>> 0;
-                
-                console.group('=== ISA MAPPING: MUL CHECK ===');
-                console.log(`PC: 0x80002768 (mul a5, a5, a3)`);
-                console.log(`Inputs:  a5=0x${a5_pre.toString(16)}, a3=0x${a3_pre.toString(16)}`);
-                console.log(`Output:  a5=0x${a5_post.toString(16)}`);
-                console.log(`Expected: 0x${expected.toString(16)}`);
-                if (a5_post !== expected) {
-                    console.error("🚨 ISA MISMATCH: Hardware ignored 'mul' or returned garbage. (Quirk #1 confirmed)");
-                } else {
-                    console.log("✅ ISA MATCH: Hardware successfully multiplied.");
-                }
-                console.groupEnd();
-                continue; // We already stepped, so skip standard step
-            }
-
-            // --- 3. BUS PROBE: Monitor the 'lbu' at 0x80002770 ---
-            // We only print this once every 50000 cycles to avoid crashing your browser with the infinite loop
-            if (pc === 0x80002770 && (totalCycles % 50000 === 0)) {
-                const a5_val = cpu.get_reg(15) >>> 0;
-                console.warn(`[BUS PROBE] lbu @ PC 0x80002770: Target Address (a5) = 0x${a5_val.toString(16)}`);
-            }
-
-            // Standard Stepping
-            cpu.step();
-            totalCycles++;
-
-            // --- 4. DERAILMENT CATCH (WITH LOGS) ---
-            const nextPc = cpu.get_pc() >>> 0;
-            if(totalCycles > 500 && nextPc < 0x80000000 && pc >= 0x80000000) {
-                console.error(`🚨 SYSTEM DERAILMENT AT CYCLE ${totalCycles} 🚨`);
-                console.log(`Transition: 0x${pc.toString(16)} -> 0x${nextPc.toString(16)}`);
-                halted = true;
-                runSpeed = 0;
-                updateOutputs();
-                return;
+            if(sp < 0x80005000 && sp >= 0x80000000) {
+                console.warn(`[STACK LOW] cycle=${DIAG.cycleCount} sp=0x${sp.toString(16)}`);
             }
         }
+    }
+
+    // Log every trap entry generically based on mtvec
+    const mtvec = cpu.get_mtvec() >>> 0;
+    if(postPc === mtvec && prePc !== mtvec - 4 && mtvec !== 0) {
+        const mepc = cpu.get_rf_reg(34)>>>0;
+        const mcause = cpu.get_mcause()>>>0;
+        const sp = cpu.get_reg(2)>>>0;
+        console.log(`[TRAP #${DIAG.trapCount}] cycle=${DIAG.cycleCount} mcause=0x${mcause.toString(16)} mepc=0x${mepc.toString(16)} sp=0x${sp.toString(16)} from=0x${prePc.toString(16)}`);
+        DIAG.trapCount++;
+        DIAG.lastTrapPc = prePc;
+    }
+
+    // 4. Key boot milestones
+    const milestones = {
+        0x80000000: 'reset vector / rom_start',
+        0x80000018: '__reset',
+        0x80000238: '.text section start',
+    };
+    if(milestones[postPc] && !DIAG.loggedAddresses.has(`ms_${postPc}`)) {
+        console.log(`[MILESTONE] cycle=${DIAG.cycleCount} PC=0x${postPc.toString(16)}: ${milestones[postPc]}`);
+        DIAG.loggedAddresses.add(`ms_${postPc}`);
+    }
+
+    // 5. UART first write
+    const txNow = cpu.read_tx_idx();
+    if(txNow > 0 && DIAG.firstUartWrite === null) {
+        DIAG.firstUartWrite = DIAG.cycleCount;
+        console.log(`[UART] First TX byte at cycle ${DIAG.cycleCount}, PC=0x${postPc.toString(16)}`);
+    }
+
+    // 7. Periodic heartbeat
+    if(DIAG.cycleCount % 1000000 === 0) {
+        console.log(`[HEARTBEAT] cycle=${DIAG.cycleCount} PC=0x${(cpu.get_pc()>>>0).toString(16)} uart_bytes=${cpu.read_tx_idx()} mtime=0x${(cpu.get_mtime_lo()>>>0).toString(16)} mtime_reads=${cpu.get_mtime_read_count()} irq_count=${cpu.get_irq_count()} first_irq_at_mtime=0x${(cpu.get_first_irq_cycle()>>>0).toString(16)} traps=${DIAG.trapCount}`);
+    }
+}
+
+// ── DIAGNOSTIC SNAPSHOT HANDLER ────────────────────────────────────────────
+document.getElementById('diagBtn').onclick = () => {
+    if(!cpu) return;
+    const lines = [];
+    lines.push('\n================= DIAGNOSTIC SNAPSHOT =================');
+    
+    lines.push('\n=== INSTRUCTION ENCODING ===');
+    for(let a=0x80000000;a<=0x8000001c;a+=4)
+        lines.push('0x'+a.toString(16)+': 0x'+(cpu.debug_read(a)>>>0).toString(16).padStart(8,'0'));
+        
+    lines.push('\n=== MTVEC ===');
+    const mtvec = cpu.get_mtvec()>>>0;
+    lines.push('mtvec: 0x'+mtvec.toString(16));
+    lines.push('mtvec binary: '+mtvec.toString(2).padStart(32,'0'));
+    lines.push('expected:     '+(0x8000001c).toString(2).padStart(32,'0'));
+    lines.push('XOR diff:     '+(mtvec^0x8000001c).toString(2).padStart(32,'0'));
+    lines.push('mtvec chunks:');
+    for(let i=0;i<16;i++)
+        lines.push('  chunk['+i+'] bits['+(i*2+1)+':'+(i*2)+']='+cpu.get_rf_word(33*16+i));
+        
+    lines.push('\n=== TRAP STATE ===');
+    lines.push('mepc RF[34]: 0x'+(cpu.get_rf_reg(34)>>>0).toString(16));
+    lines.push('mcause: 0x'+(cpu.get_mcause()>>>0).toString(16));
+    
+    lines.push('\n=== STACK DUMP (around SP) ===');
+    const sp = cpu.get_reg(2)>>>0;
+    lines.push('sp=0x'+sp.toString(16));
+    for(let a=sp-16;a<=sp+16;a+=4)
+        lines.push('  0x'+a.toString(16)+': 0x'+(cpu.debug_read(a)>>>0).toString(16).padStart(8,'0'));
+        
+    lines.push('\n=== ROM TRAMPOLINE ===');
+    lines.push('ROM[0]: 0x'+(cpu.debug_read(0)>>>0).toString(16)+' (expect 0x80000297)');
+    lines.push('ROM[4]: 0x'+(cpu.debug_read(4)>>>0).toString(16)+' (expect 0x00028067)');
+
+    lines.push('\n=== ALL REGISTERS ===');
+    for(let r=0;r<32;r++)
+        lines.push(ABI[r]+'=0x'+(cpu.get_reg(r)>>>0).toString(16));
+
+    lines.push('\n=== TIMER STATE ===');
+    lines.push('mtime_lo: 0x'+(cpu.get_mtime_lo()>>>0).toString(16));
+    lines.push('mtime_hi: 0x'+(cpu.get_mtime_hi()>>>0).toString(16));
+    lines.push('mtime_read_count: '+cpu.get_mtime_read_count());
+    lines.push('irq_count: '+cpu.get_irq_count());
+    
+    lines.push('\n=== UART LOG ===');
+    const ucount = cpu.get_uart_log_count();
+    lines.push('uart transactions: '+ucount);
+    const regNames = ['THR/RBR','IER','FCR','LCR','MCR','LSR','MSR','SCR'];
+    for(let i=0;i<ucount;i++)
+        lines.push('  ['+i+'] '+(cpu.get_uart_log_entry(i,1)?'W':'R')+
+                   ' reg='+( regNames[cpu.get_uart_log_entry(i,0)]||cpu.get_uart_log_entry(i,0))+
+                   ' val=0x'+cpu.get_uart_log_entry(i,2).toString(16));
+
+    lines.push('\n=== UNKNOWN MMIO ACCESSES ===');
+    const uac = cpu.get_unknown_count();
+    lines.push('count: '+uac);
+    for(let i=0;i<uac;i++)
+        lines.push('  [cycle='+cpu.get_unknown_cycle(i)+'] '+
+                   (cpu.get_unknown_we(i)?'W':'R')+
+                   ' addr=0x'+cpu.get_unknown_addr(i).toString(16)+
+                   ' val=0x'+cpu.get_unknown_val(i).toString(16));
+
+    lines.push('\n=== BOOT TRACE (unique PCs 0x80000000-0x80001200) ===');
+    DIAG.bootTrace.forEach(e => 
+        lines.push('  cycle='+e.cycle+' pc=0x'+e.pc.toString(16)));
+
+    term.textContent += lines.join('\n') + '\n=======================================================\n';
+    term.scrollTop = term.scrollHeight;
+};
+
+function tick() {
+    if(cpu && runSpeed > 0){
+        for(let i=0; i<runSpeed; i++) diagStep();
         updateOutputs();
     }
-    if (!halted) requestAnimationFrame(tick);
+    requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
 
@@ -608,13 +849,13 @@ document.getElementById('loadBinBtn').onclick = () => { if(!cpu) return; documen
 document.getElementById('btnFast').onclick  = () => runSpeed = 50000;
 document.getElementById('btnSlow').onclick  = () => runSpeed = 200;
 document.getElementById('btnPause').onclick = () => runSpeed = 0;
-document.getElementById('btnTickCyc').onclick = () => { runSpeed = 0; if(cpu){ cpu.step(); updateOutputs(); } };
+document.getElementById('btnTickCyc').onclick = () => { runSpeed = 0; if(cpu){ diagStep(); updateOutputs(); } };
 document.getElementById('btnTickInst').onclick = () => {
     runSpeed = 0; if(!cpu) return;
-    for(let i=0;i<35;i++) cpu.step();
+    for(let i=0;i<35;i++) diagStep();
     const start = cpu.get_pc() >>> 0;
     let extra = 0;
-    while((cpu.get_pc()>>>0)===start && extra<200){ cpu.step(); extra++; }
+    while((cpu.get_pc()>>>0)===start && extra<200){ diagStep(); extra++; }
     updateOutputs();
 };
 
