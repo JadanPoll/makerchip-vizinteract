@@ -58,9 +58,9 @@ if [[ "$install_sdk" =~ ^[Yy]$ ]]; then
     sudo tar xf zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz -C /opt
     sudo tar xf toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz -C /opt/zephyr-sdk-1.0.1
 
-    # Fix SDK 1.0.1 layout bug
+    # Fix SDK 1.0.1 layout bug (force flag added for idempotency)
     sudo mkdir -p /opt/zephyr-sdk-1.0.1/gnu
-    sudo ln -s /opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf /opt/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf
+    sudo ln -sf /opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf /opt/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf
     
     # Clean up downloaded archives
     rm zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz
@@ -153,10 +153,10 @@ echo -e "\n${C_HEAD}>>> 3. Injecting Kconfig Hardware Overrides...${C_RESET}"
 echo -e "${C_WHY}  -> WHY: Generic Zephyr assumes the CPU supports 'wfi' (Wait For Interrupt)."
 echo -e "          SERV does not. We use an app-level Kconfig backdoor to force Zephyr"
 echo -e "          to accept a custom idle loop without touching upstream OS files.${C_RESET}"
-echo -e "${C_CODE}  -> HOW: + config SERV_CUSTOM_IDLE"
-echo -e "          +     select ARCH_HAS_CUSTOM_CPU_IDLE${C_RESET}"
 
-cat > ./${APP_DIR}/Kconfig << 'EOF'
+if [ ! -f "./${APP_DIR}/Kconfig" ]; then
+    echo -e "${C_CODE}  -> HOW: Creating new Kconfig in ${APP_DIR}${C_RESET}"
+    cat > ./${APP_DIR}/Kconfig << 'EOF'
 mainmenu "SERV Application"
 source "Kconfig.zephyr"
 
@@ -165,6 +165,21 @@ config SERV_CUSTOM_IDLE
 	select ARCH_HAS_CUSTOM_CPU_IDLE
 	select ARCH_HAS_CUSTOM_CPU_ATOMIC_IDLE
 EOF
+else
+    # Append to existing if not already present
+    if ! grep -q "SERV_CUSTOM_IDLE" ./${APP_DIR}/Kconfig; then
+        echo -e "${C_CODE}  -> HOW: Appending to existing Kconfig in ${APP_DIR}${C_RESET}"
+        cat >> ./${APP_DIR}/Kconfig << 'EOF'
+
+config SERV_CUSTOM_IDLE
+	def_bool y
+	select ARCH_HAS_CUSTOM_CPU_IDLE
+	select ARCH_HAS_CUSTOM_CPU_ATOMIC_IDLE
+EOF
+    else
+        echo -e "${C_CODE}  -> HOW: Kconfig already patched in ${APP_DIR}${C_RESET}"
+    fi
+fi
 
 
 # -----------------------------------------------------------------------------
@@ -173,7 +188,6 @@ EOF
 echo -e "\n${C_HEAD}>>> 4. Generating Safe RV32I Idle Implementation...${C_RESET}"
 echo -e "${C_WHY}  -> WHY: We can't use a blank function. Zephyr calls the idle loop with"
 echo -e "          interrupts LOCKED. We must unlock IRQs so the timer can wake us.${C_RESET}"
-echo -e "${C_CODE}  -> HOW: + void arch_cpu_idle(void) { irq_unlock(MSTATUS_IEN); }${C_RESET}"
 
 # Ensure the src directory exists
 mkdir -p ./${APP_DIR}/src
@@ -194,9 +208,15 @@ void arch_cpu_atomic_idle(unsigned int key)
 }
 EOF
 
-if ! grep -q "serv_idle.c" ./${APP_DIR}/CMakeLists.txt; then
-    echo -e "${C_CODE}  -> HOW: \$ echo \"target_sources(app PRIVATE src/serv_idle.c)\" >> CMakeLists.txt${C_RESET}"
-    echo "target_sources(app PRIVATE src/serv_idle.c)" >> ./${APP_DIR}/CMakeLists.txt
+if [ -f "./${APP_DIR}/CMakeLists.txt" ]; then
+    if ! grep -q "serv_idle.c" ./${APP_DIR}/CMakeLists.txt; then
+        echo -e "${C_CODE}  -> HOW: \$ echo \"target_sources(app PRIVATE src/serv_idle.c)\" >> CMakeLists.txt${C_RESET}"
+        echo "target_sources(app PRIVATE src/serv_idle.c)" >> ./${APP_DIR}/CMakeLists.txt
+    else
+        echo -e "${C_CODE}  -> HOW: serv_idle.c already linked in CMakeLists.txt${C_RESET}"
+    fi
+else
+    echo -e "${C_WARN}⚠️  WARNING: No CMakeLists.txt found in ${APP_DIR}! The serv_idle.c might not be compiled.${C_RESET}"
 fi
 
 
@@ -256,6 +276,7 @@ ls -la $BIN_FILE
 echo -e "\n${C_HEAD}>>> SUCCESS: zephyr.bin is ready for the SERV simulator.${C_RESET}"
 echo -e "${C_WHY}>>> TIP: Keep zephyr.sym and zephyr.dis open in VS Code. If the simulator${C_RESET}"
 echo -e "${C_WHY}>>> traps at an address, search for it in those files to see exactly why!${C_RESET}"
+
 # -----------------------------------------------------------------------------
 # EPILOGUE: NOTE ON OPTIMIZATION
 # -----------------------------------------------------------------------------
