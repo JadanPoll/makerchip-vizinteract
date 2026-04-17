@@ -185,30 +185,48 @@ west build -b qemu_riscv32 samples/hello_world \
   -- -DEXTRA_CONF_FILE=/tmp/serv_prj.conf \
      -DDTC_OVERLAY_FILE=/tmp/serv2.overlay
 
-
 # -----------------------------------------------------------------------------
-# PHASE 6: VERIFICATION & AUDIT
+# PHASE 6: ARTIFACT GENERATION & AUDIT
 # -----------------------------------------------------------------------------
 echo -e "\n==========================================================="
-echo "=== BUILD AUDIT & VERIFICATION ==="
+echo "=== BUILD AUDIT & ARTIFACT GENERATION ==="
 echo "==========================================================="
 
+ELF_FILE="build/zephyr/zephyr.elf"
+BIN_FILE="build/zephyr/zephyr.bin"
+
+# Locate the exact toolchain binaries dynamically
+TOOLCHAIN_PREFIX="${ZEPHYR_SDK_INSTALL_DIR}/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-"
+READELF="${TOOLCHAIN_PREFIX}readelf"
+OBJDUMP="${TOOLCHAIN_PREFIX}objdump"
+NM="${TOOLCHAIN_PREFIX}nm"
+
 echo -e "\n${C_HEAD}[AUDIT 1] Checking ISA Compliance (Must be RV32I only):${C_RESET}"
-/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-readelf \
-  -A build/zephyr/zephyr.elf | grep -i "tag_riscv"
+$READELF -A $ELF_FILE | grep -i "tag_riscv"
 
-echo -e "\n${C_HEAD}[AUDIT 2] Checking 'wfi' Eradication (Should be 1, only in unused SMP boot loop):${C_RESET}"
-/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-objdump -d \
-  build/zephyr/zephyr.elf | grep -c "wfi" || true
+echo -e "\n${C_HEAD}[AUDIT 2] Checking 'wfi' Eradication (Should be 1, only in unused SMP loop):${C_RESET}"
+$OBJDUMP -d $ELF_FILE | grep -c "wfi" || true
 
-echo -e "\n${C_HEAD}[AUDIT 3] Verifying arch_cpu_idle Implementation (Must show li, csrs, ret. NO wfi):${C_RESET}"
-/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-objdump -d \
-  build/zephyr/zephyr.elf | grep -A6 "<arch_cpu_idle>:"
+echo -e "\n${C_HEAD}[AUDIT 3] Generating Simulator Care Package...${C_RESET}"
+
+# 1. Extract the Entry Point
+ENTRY_POINT=$($READELF -h $ELF_FILE | grep "Entry point address" | awk '{print $4}')
+echo -e "${C_CODE}  -> Boot Entry Point: ${ENTRY_POINT}${C_RESET}"
+
+# 2. Generate Full Disassembly (Mixed C and Assembly)
+$OBJDUMP -d -S $ELF_FILE > build/zephyr/zephyr.dis
+echo -e "${C_CODE}  -> Generated Disassembly: build/zephyr/zephyr.dis${C_RESET}"
+
+# 3. Generate System Symbol Map (Sorted by Address)
+$NM -n $ELF_FILE > build/zephyr/zephyr.sym
+echo -e "${C_CODE}  -> Generated Symbol Map: build/zephyr/zephyr.sym${C_RESET}"
 
 echo -e "\n${C_HEAD}[AUDIT 4] Final Binary Information:${C_RESET}"
-ls -la build/zephyr/zephyr.bin
+ls -la $BIN_FILE
 
 echo -e "\n${C_HEAD}>>> SUCCESS: zephyr.bin is ready for the SERV simulator.${C_RESET}"
+echo -e "${C_WHY}>>> TIP: Keep zephyr.sym and zephyr.dis open in VS Code. If the simulator${C_RESET}"
+echo -e "${C_WHY}>>> traps at an address, search for it in those files to see exactly why!${C_RESET}"
 
 # -----------------------------------------------------------------------------
 # EPILOGUE: NOTE ON OPTIMIZATION
@@ -222,5 +240,4 @@ echo -e "you do NOT need to run this full script every time."
 echo -e ""
 echo -e "For fast, incremental daily development, simply run:"
 echo -e "${C_CODE}\$ west build${C_RESET}"
-echo -e "Zephyr's Ninja backend will only recompile the files you change."
 echo "==========================================================="
