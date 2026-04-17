@@ -14,6 +14,12 @@ echo "==========================================================="
 echo "=== SERV RISC-V Zephyr Build Script (Architectural Pure) ==="
 echo "==========================================================="
 
+# Ensure we are in the Zephyr root directory
+if [ ! -f "west.yml" ] && [ ! -d "boards" ]; then
+    echo -e "\n${C_WARN}⚠️  ERROR: Please run this script from the root of your Zephyr workspace!${C_RESET}"
+    exit 1
+fi
+
 # -----------------------------------------------------------------------------
 # PHASE 0: TOOLCHAIN INSTALLATION (SMART DETECT)
 # -----------------------------------------------------------------------------
@@ -65,9 +71,32 @@ else
     echo -e "${C_CODE}>>> Skipping SDK installation.${C_RESET}"
 fi
 
-# We must export these variables into the script's environment every time it runs
 export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+
+# -----------------------------------------------------------------------------
+# PHASE 0.5: APPLICATION SELECTION
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 0.5. Select Application to Build...${C_RESET}"
+echo -e "${C_WHY}  -> NOTE: The HTML Simulator only has virtual CPU, SRAM, ROM, Timer, and UART."
+echo -e "           Samples requiring GPIO, I2C, or Networking will hit missing memory addresses.${C_RESET}"
+echo "  1) Hello World      (🟢 Supported - Basic Sanity Check)"
+echo "  2) Philosophers     (🟢 Supported - Heavy Multithreading & Preemption)"
+echo "  3) Synchronization  (🟢 Supported - Kernel Mutexes & Semaphores)"
+echo "  4) System Heap      (🟢 Supported - Pure RAM Allocator)"
+echo "  5) Blinky           (🔴 Fails in HTML - Requires GPIO controller)"
+echo -e "${C_PROMPT}>>> Enter the number of the sample to build [default: 1]: ${C_RESET}\c"
+read -r app_choice
+
+case "$app_choice" in
+    2) APP_DIR="samples/philosophers" ;;
+    3) APP_DIR="samples/synchronization" ;;
+    4) APP_DIR="samples/basic/sys_heap" ;;
+    5) APP_DIR="samples/basic/blinky" ;;
+    *) APP_DIR="samples/hello_world" ;;
+esac
+
+echo -e "${C_CODE}  -> Target locked: ${APP_DIR}${C_RESET}"
 
 
 # -----------------------------------------------------------------------------
@@ -78,11 +107,10 @@ echo -e "${C_WHY}  -> WHY: We must guarantee that previous dirty builds or hacke
 echo -e "          don't contaminate this run. We restore Zephyr to absolute purity.${C_RESET}"
 echo -e "${C_CODE}  -> HOW: \$ git checkout arch/riscv/core/cpu_idle.c${C_RESET}"
 
-cd /workspaces/zephyr
 git checkout boards/qemu/riscv32/Kconfig.qemu_riscv32 2>/dev/null || true
 git checkout arch/riscv/core/cpu_idle.c 2>/dev/null || true
 
-# Fast Python deps check (idempotent, takes < 1 second if installed)
+# Fast Python deps check
 pip3 install west pyelftools 2>/dev/null || true
 pip3 install -r scripts/requirements.txt 2>/dev/null || true
 west init -l . 2>/dev/null || true
@@ -96,14 +124,12 @@ echo -e "${C_WHY}  -> WHY: SERV is a minimal core. We explicitly strip out FPU a
 echo -e "          the ISA to strict RV32I so the compiler doesn't sneak in Atomics.${C_RESET}"
 echo -e "${C_CODE}  -> HOW: + cpu@0 { riscv,isa-extensions = \"i\", \"zicsr\", \"zifencei\"; };${C_RESET}"
 
-# Project Config
 cat > /tmp/serv_prj.conf << 'EOF'
 CONFIG_BUILD_OUTPUT_BIN=y
 CONFIG_RISCV_PMP=n
 CONFIG_FPU=n
 EOF
 
-# DeviceTree Overlay
 cat > /tmp/serv2.overlay << 'EOF'
 / {
     cpus {
@@ -130,7 +156,7 @@ echo -e "          to accept a custom idle loop without touching upstream OS fil
 echo -e "${C_CODE}  -> HOW: + config SERV_CUSTOM_IDLE"
 echo -e "          +     select ARCH_HAS_CUSTOM_CPU_IDLE${C_RESET}"
 
-cat > /workspaces/zephyr/samples/hello_world/Kconfig << 'EOF'
+cat > ./${APP_DIR}/Kconfig << 'EOF'
 mainmenu "SERV Application"
 source "Kconfig.zephyr"
 
@@ -149,7 +175,10 @@ echo -e "${C_WHY}  -> WHY: We can't use a blank function. Zephyr calls the idle 
 echo -e "          interrupts LOCKED. We must unlock IRQs so the timer can wake us.${C_RESET}"
 echo -e "${C_CODE}  -> HOW: + void arch_cpu_idle(void) { irq_unlock(MSTATUS_IEN); }${C_RESET}"
 
-cat > /workspaces/zephyr/samples/hello_world/src/serv_idle.c << 'EOF'
+# Ensure the src directory exists
+mkdir -p ./${APP_DIR}/src
+
+cat > ./${APP_DIR}/src/serv_idle.c << 'EOF'
 #include <zephyr/irq.h>
 
 void arch_cpu_idle(void)
@@ -165,10 +194,9 @@ void arch_cpu_atomic_idle(unsigned int key)
 }
 EOF
 
-# Link the new C file into the Zephyr CMake build system (Idempotent check)
-if ! grep -q "serv_idle.c" /workspaces/zephyr/samples/hello_world/CMakeLists.txt; then
+if ! grep -q "serv_idle.c" ./${APP_DIR}/CMakeLists.txt; then
     echo -e "${C_CODE}  -> HOW: \$ echo \"target_sources(app PRIVATE src/serv_idle.c)\" >> CMakeLists.txt${C_RESET}"
-    echo "target_sources(app PRIVATE src/serv_idle.c)" >> /workspaces/zephyr/samples/hello_world/CMakeLists.txt
+    echo "target_sources(app PRIVATE src/serv_idle.c)" >> ./${APP_DIR}/CMakeLists.txt
 fi
 
 
@@ -178,12 +206,13 @@ fi
 echo -e "\n${C_HEAD}>>> 5. Compiling OS Image...${C_RESET}"
 echo -e "${C_WHY}  -> WHY: We wipe the build folder entirely to destroy cached CMake logic"
 echo -e "          that might retain the lethal 'wfi' instructions from previous runs.${C_RESET}"
-echo -e "${C_CODE}  -> HOW: \$ rm -rf build/ && west build -b qemu_riscv32 ...${C_RESET}"
+echo -e "${C_CODE}  -> HOW: \$ rm -rf build/ && west build -b qemu_riscv32 ${APP_DIR} ...${C_RESET}"
 
-rm -rf /workspaces/zephyr/build/
-west build -b qemu_riscv32 samples/hello_world \
+rm -rf build/
+west build -b qemu_riscv32 ${APP_DIR} \
   -- -DEXTRA_CONF_FILE=/tmp/serv_prj.conf \
      -DDTC_OVERLAY_FILE=/tmp/serv2.overlay
+
 
 # -----------------------------------------------------------------------------
 # PHASE 6: ARTIFACT GENERATION & AUDIT
@@ -204,7 +233,7 @@ NM="${TOOLCHAIN_PREFIX}nm"
 echo -e "\n${C_HEAD}[AUDIT 1] Checking ISA Compliance (Must be RV32I only):${C_RESET}"
 $READELF -A $ELF_FILE | grep -i "tag_riscv"
 
-echo -e "\n${C_HEAD}[AUDIT 2] Checking 'wfi' Eradication (Should be 1, only in unused SMP loop):${C_RESET}"
+echo -e "\n${C_HEAD}[AUDIT 2] Checking 'wfi' Eradication (Should be 1, only in unused SMP boot loop):${C_RESET}"
 $OBJDUMP -d $ELF_FILE | grep -c "wfi" || true
 
 echo -e "\n${C_HEAD}[AUDIT 3] Generating Simulator Care Package...${C_RESET}"
@@ -227,7 +256,6 @@ ls -la $BIN_FILE
 echo -e "\n${C_HEAD}>>> SUCCESS: zephyr.bin is ready for the SERV simulator.${C_RESET}"
 echo -e "${C_WHY}>>> TIP: Keep zephyr.sym and zephyr.dis open in VS Code. If the simulator${C_RESET}"
 echo -e "${C_WHY}>>> traps at an address, search for it in those files to see exactly why!${C_RESET}"
-
 # -----------------------------------------------------------------------------
 # EPILOGUE: NOTE ON OPTIMIZATION
 # -----------------------------------------------------------------------------
@@ -240,4 +268,5 @@ echo -e "you do NOT need to run this full script every time."
 echo -e ""
 echo -e "For fast, incremental daily development, simply run:"
 echo -e "${C_CODE}\$ west build${C_RESET}"
+echo -e "Zephyr's Ninja backend will only recompile the files you change."
 echo "==========================================================="
