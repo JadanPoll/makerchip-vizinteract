@@ -127,12 +127,13 @@ cat > /tmp/serv_prj.conf << 'EOF'
 CONFIG_BUILD_OUTPUT_BIN=y
 CONFIG_RISCV_PMP=n
 CONFIG_FPU=n
-
+CONFIG_THREAD_LOCAL_STORAGE=n
 # Subservient runs entirely out of unified SRAM (No separate ROM/Flash)
 CONFIG_XIP=n
 # Keep the stack reasonable to fit in 64KB alongside the OS
 CONFIG_MAIN_STACK_SIZE=1024
 EOF
+
 
 cat > /tmp/serv2.overlay << 'EOF'
 / {
