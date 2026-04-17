@@ -138,8 +138,9 @@ EOF
 cat > /tmp/serv2.overlay << 'EOF'
 / {
     chosen {
-        /* Force Zephyr to use our unified memory block instead of QEMU's default */
         zephyr,sram = &unified_sram;
+        zephyr,console = &uart0;
+        zephyr,shell-uart = &uart0;
     };
 
     /* Subservient Memory: 64KB total - 144 bytes for Register File = 0xFF6C */
@@ -150,14 +151,31 @@ cat > /tmp/serv2.overlay << 'EOF'
 
     cpus {
         cpu@0 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@1 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@2 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@3 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@4 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@5 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@6 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
-        cpu@7 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@1 { status = "disabled"; };
+        cpu@2 { status = "disabled"; };
+        cpu@3 { status = "disabled"; };
+        cpu@4 { status = "disabled"; };
+        cpu@5 { status = "disabled"; };
+        cpu@6 { status = "disabled"; };
+        cpu@7 { status = "disabled"; };
     };
+};
+
+/* ==================================================================== */
+/* SUBSERVIENT HARDWARE ROUTING FIX                                     */
+/* Move all peripherals >= 0x40000000 to trigger external Wishbone bus  */
+/* ==================================================================== */
+
+&uart0 {
+    reg = <0x40000000 0x100>;
+};
+
+&clint {
+    reg = <0x42000000 0x10000>;
+};
+
+&plic {
+    reg = <0x4C000000 0x4000000>;
 };
 EOF
 
