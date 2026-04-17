@@ -18,6 +18,8 @@
 #define CXXRTL_ALWAYS_INLINE inline
 
 
+
+
 /* Fixed-width integer types */
 typedef signed char        int8_t;
 typedef short              int16_t;
@@ -32,7 +34,8 @@ typedef unsigned long long uint64_t;
 /* Address/Size types */
 typedef unsigned int       uintptr_t;
 typedef int                intptr_t;
-typedef unsigned int       size_t;
+typedef unsigned long      size_t;      // <-- Changed to unsigned long
+
 
 
 #ifndef UINT32_C
