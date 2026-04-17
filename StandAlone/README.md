@@ -443,7 +443,7 @@ If you add a second WASM module or multiple `init_cpu()` calls, this zeroing mus
 
 ---
 
-**## 21. CXXRTL `/*outline*/` SIGNALS ARE ALWAYS STALE AFTER `step()`**
+## 21. CXXRTL `/*outline*/` SIGNALS ARE ALWAYS STALE AFTER `step()`
 
 **You might expect**: Reading `p_cpu_2e_rf__ram__if_2e_wcnt.data[0]` after `step()` gives the current wcnt value.
 
