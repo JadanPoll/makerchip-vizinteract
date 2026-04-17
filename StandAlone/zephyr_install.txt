@@ -1,32 +1,226 @@
-# From codespaces
-# 1. Deps (ninja & dtc only — cmake and pip already present in Codespace)
-sudo apt-get install -y --no-install-recommends ninja-build device-tree-compiler
-pip3 install kconfiglib --break-system-packages
+#!/bin/bash
+# Fail immediately if any command exits with a non-zero status
+set -e
 
-# 2. SDK — minimal scaffold + riscv toolchain only
-wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v1.0.1/zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz
-wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v1.0.1/toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz
+# Terminal Colors for educational output
+C_HEAD='\e[1;33m'   # Bold Yellow
+C_WHY='\e[36m'      # Cyan
+C_CODE='\e[1;32m'   # Bold Green
+C_PROMPT='\e[1;35m' # Bold Magenta
+C_WARN='\e[1;31m'   # Bold Red
+C_RESET='\e[0m'     # Reset
 
-tar xf zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz -C /opt
-tar xf toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz -C /opt/zephyr-sdk-1.0.1
+echo "==========================================================="
+echo "=== SERV RISC-V Zephyr Build Script (Architectural Pure) ==="
+echo "==========================================================="
 
-# 3. Fix SDK 1.0.1 layout bug — cmake expects gnu/ subdir
-mkdir -p /opt/zephyr-sdk-1.0.1/gnu
-ln -s /opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf /opt/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf
+# -----------------------------------------------------------------------------
+# PHASE 0: TOOLCHAIN INSTALLATION (SMART DETECT)
+# -----------------------------------------------------------------------------
+EXPECTED_SDK_DIR="/opt/zephyr-sdk-1.0.1"
+EXPECTED_COMPILER="${EXPECTED_SDK_DIR}/gnu/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-gcc"
 
-# 4. Environment
+if [ ! -f "$EXPECTED_COMPILER" ]; then
+    echo -e "\n${C_WARN}⚠️  Zephyr RISC-V Compiler NOT found at ${EXPECTED_COMPILER}!${C_RESET}"
+    DEFAULT_ANS="Y"
+    PROMPT_TEXT=">>> Do you want to install the Zephyr SDK and Toolchain now? [Y/n]: "
+else
+    echo -e "\n${C_CODE}✓ Zephyr RISC-V Toolchain detected successfully.${C_RESET}"
+    DEFAULT_ANS="N"
+    PROMPT_TEXT=">>> Do you want to forcefully re-install the Zephyr SDK? [y/N]: "
+fi
+
+echo -e "${C_PROMPT}${PROMPT_TEXT}${C_RESET}\c"
+read -r install_sdk
+
+# If the user just hits Enter, use the smart default
+if [ -z "$install_sdk" ]; then
+    install_sdk=$DEFAULT_ANS
+fi
+
+if [[ "$install_sdk" =~ ^[Yy]$ ]]; then
+    echo -e "\n${C_HEAD}>>> 0. Installing Zephyr SDK & Dependencies...${C_RESET}"
+    echo -e "${C_WHY}  -> WHY: This downloads the RISC-V GCC compilers and tools needed to build the OS.${C_RESET}"
+    
+    sudo apt-get update
+    sudo apt-get install -y --no-install-recommends ninja-build device-tree-compiler
+    pip3 install kconfiglib --break-system-packages
+
+    wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v1.0.1/zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz
+    wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v1.0.1/toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz
+
+    sudo tar xf zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz -C /opt
+    sudo tar xf toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz -C /opt/zephyr-sdk-1.0.1
+
+    # Fix SDK 1.0.1 layout bug
+    sudo mkdir -p /opt/zephyr-sdk-1.0.1/gnu
+    sudo ln -s /opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf /opt/zephyr-sdk-1.0.1/gnu/riscv64-zephyr-elf
+    
+    # Clean up downloaded archives
+    rm zephyr-sdk-1.0.1_linux-x86_64_minimal.tar.xz
+    rm toolchain_gnu_linux-x86_64_riscv64-zephyr-elf.tar.xz
+
+    echo -e "${C_CODE}  -> SDK installed successfully!${C_RESET}"
+else
+    echo -e "${C_CODE}>>> Skipping SDK installation.${C_RESET}"
+fi
+
+# We must export these variables into the script's environment every time it runs
 export ZEPHYR_SDK_INSTALL_DIR=/opt/zephyr-sdk-1.0.1
-export ZEPHYR_BASE=~/zephyrproject/zephyr
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr
 
-# 5. Build
-cmake -B build -GNinja \
-  -DBOARD=qemu_riscv32 \
-  -DCONFIG_BUILD_OUTPUT_BIN=y \
-  -DCONFIG_MINIMAL_LIBC=y \
-  ~/zephyrproject/zephyr/samples/hello_world
 
-ninja -C build
+# -----------------------------------------------------------------------------
+# PHASE 1: ENVIRONMENT SANITIZATION
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 1. Sanitizing Environment...${C_RESET}"
+echo -e "${C_WHY}  -> WHY: We must guarantee that previous dirty builds or hacked OS files"
+echo -e "          don't contaminate this run. We restore Zephyr to absolute purity.${C_RESET}"
+echo -e "${C_CODE}  -> HOW: \$ git checkout arch/riscv/core/cpu_idle.c${C_RESET}"
 
-# Artifact:
-ls build/zephyr/zephyr.bin
+cd /workspaces/zephyr
+git checkout boards/qemu/riscv32/Kconfig.qemu_riscv32 2>/dev/null || true
+git checkout arch/riscv/core/cpu_idle.c 2>/dev/null || true
+
+# Fast Python deps check (idempotent, takes < 1 second if installed)
+pip3 install west pyelftools 2>/dev/null || true
+pip3 install -r scripts/requirements.txt 2>/dev/null || true
+west init -l . 2>/dev/null || true
+
+
+# -----------------------------------------------------------------------------
+# PHASE 2: BASE CONFIGURATION & HARDWARE OVERLAY
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 2. Generating Base Configurations & Overlays...${C_RESET}"
+echo -e "${C_WHY}  -> WHY: SERV is a minimal core. We explicitly strip out FPU and force"
+echo -e "          the ISA to strict RV32I so the compiler doesn't sneak in Atomics.${C_RESET}"
+echo -e "${C_CODE}  -> HOW: + cpu@0 { riscv,isa-extensions = \"i\", \"zicsr\", \"zifencei\"; };${C_RESET}"
+
+# Project Config
+cat > /tmp/serv_prj.conf << 'EOF'
+CONFIG_BUILD_OUTPUT_BIN=y
+CONFIG_RISCV_PMP=n
+CONFIG_FPU=n
+EOF
+
+# DeviceTree Overlay
+cat > /tmp/serv2.overlay << 'EOF'
+/ {
+    cpus {
+        cpu@0 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@1 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@2 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@3 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@4 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@5 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@6 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+        cpu@7 { riscv,isa-extensions = "i", "zicsr", "zifencei"; };
+    };
+};
+EOF
+
+
+# -----------------------------------------------------------------------------
+# PHASE 3: THE KCONFIG BACKDOOR (IDLE OVERRIDE)
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 3. Injecting Kconfig Hardware Overrides...${C_RESET}"
+echo -e "${C_WHY}  -> WHY: Generic Zephyr assumes the CPU supports 'wfi' (Wait For Interrupt)."
+echo -e "          SERV does not. We use an app-level Kconfig backdoor to force Zephyr"
+echo -e "          to accept a custom idle loop without touching upstream OS files.${C_RESET}"
+echo -e "${C_CODE}  -> HOW: + config SERV_CUSTOM_IDLE"
+echo -e "          +     select ARCH_HAS_CUSTOM_CPU_IDLE${C_RESET}"
+
+cat > /workspaces/zephyr/samples/hello_world/Kconfig << 'EOF'
+mainmenu "SERV Application"
+source "Kconfig.zephyr"
+
+config SERV_CUSTOM_IDLE
+	def_bool y
+	select ARCH_HAS_CUSTOM_CPU_IDLE
+	select ARCH_HAS_CUSTOM_CPU_ATOMIC_IDLE
+EOF
+
+
+# -----------------------------------------------------------------------------
+# PHASE 4: THE CUSTOM IDLE IMPLEMENTATION
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 4. Generating Safe RV32I Idle Implementation...${C_RESET}"
+echo -e "${C_WHY}  -> WHY: We can't use a blank function. Zephyr calls the idle loop with"
+echo -e "          interrupts LOCKED. We must unlock IRQs so the timer can wake us.${C_RESET}"
+echo -e "${C_CODE}  -> HOW: + void arch_cpu_idle(void) { irq_unlock(MSTATUS_IEN); }${C_RESET}"
+
+cat > /workspaces/zephyr/samples/hello_world/src/serv_idle.c << 'EOF'
+#include <zephyr/irq.h>
+
+void arch_cpu_idle(void)
+{
+	/* Unlock interrupts so the scheduler/timers can wake us */
+	irq_unlock(MSTATUS_IEN);
+}
+
+void arch_cpu_atomic_idle(unsigned int key)
+{
+	/* Unlock interrupts to the specific state requested by the kernel */
+	irq_unlock(key);
+}
+EOF
+
+# Link the new C file into the Zephyr CMake build system (Idempotent check)
+if ! grep -q "serv_idle.c" /workspaces/zephyr/samples/hello_world/CMakeLists.txt; then
+    echo -e "${C_CODE}  -> HOW: \$ echo \"target_sources(app PRIVATE src/serv_idle.c)\" >> CMakeLists.txt${C_RESET}"
+    echo "target_sources(app PRIVATE src/serv_idle.c)" >> /workspaces/zephyr/samples/hello_world/CMakeLists.txt
+fi
+
+
+# -----------------------------------------------------------------------------
+# PHASE 5: COMPILATION
+# -----------------------------------------------------------------------------
+echo -e "\n${C_HEAD}>>> 5. Compiling OS Image...${C_RESET}"
+echo -e "${C_WHY}  -> WHY: We wipe the build folder entirely to destroy cached CMake logic"
+echo -e "          that might retain the lethal 'wfi' instructions from previous runs.${C_RESET}"
+echo -e "${C_CODE}  -> HOW: \$ rm -rf build/ && west build -b qemu_riscv32 ...${C_RESET}"
+
+rm -rf /workspaces/zephyr/build/
+west build -b qemu_riscv32 samples/hello_world \
+  -- -DEXTRA_CONF_FILE=/tmp/serv_prj.conf \
+     -DDTC_OVERLAY_FILE=/tmp/serv2.overlay
+
+
+# -----------------------------------------------------------------------------
+# PHASE 6: VERIFICATION & AUDIT
+# -----------------------------------------------------------------------------
+echo -e "\n==========================================================="
+echo "=== BUILD AUDIT & VERIFICATION ==="
+echo "==========================================================="
+
+echo -e "\n${C_HEAD}[AUDIT 1] Checking ISA Compliance (Must be RV32I only):${C_RESET}"
+/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-readelf \
+  -A build/zephyr/zephyr.elf | grep -i "tag_riscv"
+
+echo -e "\n${C_HEAD}[AUDIT 2] Checking 'wfi' Eradication (Should be 1, only in unused SMP boot loop):${C_RESET}"
+/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-objdump -d \
+  build/zephyr/zephyr.elf | grep -c "wfi" || true
+
+echo -e "\n${C_HEAD}[AUDIT 3] Verifying arch_cpu_idle Implementation (Must show li, csrs, ret. NO wfi):${C_RESET}"
+/opt/zephyr-sdk-1.0.1/riscv64-zephyr-elf/bin/riscv64-zephyr-elf-objdump -d \
+  build/zephyr/zephyr.elf | grep -A6 "<arch_cpu_idle>:"
+
+echo -e "\n${C_HEAD}[AUDIT 4] Final Binary Information:${C_RESET}"
+ls -la build/zephyr/zephyr.bin
+
+echo -e "\n${C_HEAD}>>> SUCCESS: zephyr.bin is ready for the SERV simulator.${C_RESET}"
+
+# -----------------------------------------------------------------------------
+# EPILOGUE: NOTE ON OPTIMIZATION
+# -----------------------------------------------------------------------------
+echo -e "\n==========================================================="
+echo -e "${C_WHY}>>> A NOTE ON BUILD OPTIMIZATION <<<${C_RESET}"
+echo -e "This script uses a 'scorched earth' approach (rm -rf build/) to guarantee"
+echo -e "a 100% reproducible baseline by preventing any stale cache issues."
+echo -e "Once you understand the architecture pieces and are writing your own C code,"
+echo -e "you do NOT need to run this full script every time."
+echo -e ""
+echo -e "For fast, incremental daily development, simply run:"
+echo -e "${C_CODE}\$ west build${C_RESET}"
+echo -e "Zephyr's Ninja backend will only recompile the files you change."
+echo "==========================================================="
