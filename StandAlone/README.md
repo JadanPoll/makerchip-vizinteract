@@ -443,9 +443,20 @@ If you add a second WASM module or multiple `init_cpu()` calls, this zeroing mus
 
 ---
 
-## 21. **CXXRTL `/*outline*/` signals are always stale after `step()`.**
+**## 21. CXXRTL `/*outline*/` SIGNALS ARE ALWAYS STALE AFTER `step()`**
 
-Specifically: `p_cpu_2e_rf__ram__if_2e_wcnt`, `p_cpu_2e_cpu_2e_state_2e_o__cnt__en`, and `p_cpu_2e_cpu_2e_rf__if_2e_o__wen1` all read as 0 after every `step()` call regardless of the actual circuit state. Use `cnt_lsb` (registered `wire<4>`) as a proxy for `cnt_en`, and compute `wcnt = rcnt - 4` in JavaScript from the registered `rcnt`. This is not a SERV quirk — it is a CXXRTL backend behavior — but it belongs in this document because every person using SERV via CXXRTL will hit it.
+**You might expect**: Reading `p_cpu_2e_rf__ram__if_2e_wcnt.data[0]` after `step()` gives the current wcnt value.
+
+**SERV actually does**: Returns 0. Always. Regardless of the actual circuit state.
+
+**Why**: CXXRTL marks combinatorial signals as `/*outline*/` and evaluates them lazily. After `step()` returns, outline signals hold their last explicitly-evaluated value — which for most combinatorial wires is 0 from initialization. They are not re-evaluated unless something downstream forces evaluation.
+
+**The three signals that will burn you**:
+- `p_cpu_2e_rf__ram__if_2e_wcnt` — always reads 0. Compute as `rcnt - 4` in JS instead.
+- `p_cpu_2e_cpu_2e_state_2e_o__cnt__en` — always reads 0. Use `cnt_lsb != 0` as proxy.
+- `p_cpu_2e_cpu_2e_rf__if_2e_o__wen1` — always reads 0. Use `wen1_r.curr` instead.
+
+**The rule**: If the CXXRTL declaration contains `/*outline*/`, do not read it after `step()`. Only read signals declared as `wire<N>` via `.curr.data[0]`. This is not a SERV quirk — it is a CXXRTL backend behavior that affects every design synthesized through Yosys CXXRTL.
 
 ---
 
